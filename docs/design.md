@@ -745,6 +745,8 @@ Each ADR records context and constraints, the decision, rejected alternatives, t
 
 ## 18. Roadmap
 
+Work is tracked as [GitHub milestones](https://github.com/Kare0638/ledgerpay/milestones), one issue per deliverable, each linked to its acceptance tests.
+
 | Milestone | Contents | Exit criteria |
 |---|---|---|
 | **M1 — Ledger and core flow** | Multi-module Maven build, Compose, Flyway V1–V2; Money, fees, state machine; ledger with deferred balance constraint and append-only triggers; idempotency; mock-psp happy path; PspOperationWorker; webhook inbox; money transaction | AT-01 – AT-05 |

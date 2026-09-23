@@ -2,7 +2,7 @@
 
 A payment, double-entry ledger and settlement reconciliation service in Java 21 and Spring Boot, built around the failure modes that matter in payments: client retries, PSP timeouts with unknown outcomes, lost or duplicated webhooks, concurrent refunds, and books that disagree with the PSP's settlement report.
 
-> **Status:** design stage. Implementation is in progress; see the [roadmap](docs/design.md#18-roadmap).
+> **Status:** design stage. Implementation is in progress; track it on the [milestones](https://github.com/Kare0638/ledgerpay/milestones) and [issues](https://github.com/Kare0638/ledgerpay/issues).
 
 ## What it demonstrates
 
