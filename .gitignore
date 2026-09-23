@@ -1,0 +1,26 @@
+# Private planning documents (kept local, not published)
+*.docx
+LedgerPay-*.md
+*:Zone.Identifier
+
+# Java / Maven
+target/
+*.class
+*.log
+.mvn/wrapper/maven-wrapper.jar
+
+# IDE
+.idea/
+*.iml
+.vscode/
+.DS_Store
+
+# Environment and secrets
+.env
+*.env.local
+
+# Terraform
+.terraform/
+*.tfstate
+*.tfstate.*
+*.tfvars
