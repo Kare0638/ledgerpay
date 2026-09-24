@@ -30,6 +30,18 @@ payment-service ──outbox──▶ Kafka ──▶ notification-service ─�
 
 See [docs/design.md](docs/design.md) for the full design: state machine, posting rules, schema, API, recovery paths, reconciliation rules and the acceptance test list.
 
+## Running locally
+
+Requires JDK 21 and Docker.
+
+```bash
+./mvnw verify                                   # build, tests (Testcontainers) and format check
+docker compose -f infra/docker-compose.yml up -d --build --wait
+curl localhost:8080/actuator/health             # payment-service; 8081 notification-service, 8082 mock-psp
+```
+
+Run `./mvnw spotless:apply` to fix formatting.
+
 ## Tech stack
 
 Java 21 · Spring Boot 3 · PostgreSQL 16 · Flyway · Apache Kafka · Testcontainers · jqwik · Micrometer / Prometheus / Grafana · k6 · Docker Compose · Terraform · AWS (ECS Fargate, RDS)

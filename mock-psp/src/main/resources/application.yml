@@ -1,0 +1,22 @@
+server:
+  port: 8082
+
+spring:
+  application:
+    name: mock-psp
+  datasource:
+    url: ${DB_URL:jdbc:postgresql://localhost:5432/mock_psp}
+    username: ${DB_USERNAME:ledgerpay}
+    password: ${DB_PASSWORD:ledgerpay}
+  flyway:
+    locations: classpath:db/migration
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info
+  endpoint:
+    health:
+      probes:
+        enabled: true
