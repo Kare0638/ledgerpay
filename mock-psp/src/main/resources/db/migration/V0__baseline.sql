@@ -1,0 +1,2 @@
+-- Empty baseline so Flyway is wired in from the start.
+-- Schema migrations follow the numbering in docs/design.md §6 (V1__core.sql onwards).

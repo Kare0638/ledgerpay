@@ -34,6 +34,24 @@ See [docs/design.md](docs/design.md) for the full design: state machine, posting
 
 Java 21 · Spring Boot 3 · PostgreSQL 16 · Flyway · Apache Kafka · Testcontainers · jqwik · Micrometer / Prometheus / Grafana · k6 · Docker Compose · Terraform · AWS (ECS Fargate, RDS)
 
+## Running locally
+
+Requires JDK 21 and Docker.
+
+```bash
+./mvnw verify                                  # unit + Testcontainers integration tests + format check
+./mvnw spotless:apply                          # fix formatting
+docker compose -f infra/docker-compose.yml up --build -d
+```
+
+| Service | Port | Health |
+|---|---|---|
+| payment-service | 8080 | http://localhost:8080/actuator/health |
+| mock-psp | 8081 | http://localhost:8081/actuator/health |
+| notification-service | 8082 | http://localhost:8082/actuator/health |
+| PostgreSQL 16 | 5432 | databases `ledgerpay` and `mockpsp` |
+| Kafka (KRaft) | 9092 | |
+
 ## Scope
 
 Single currency (GBP), simulated PSP. Real card-scheme integration, PCI DSS, SCA, FX, chargebacks and merchant payouts are deliberately out of scope; the design document explains why.
