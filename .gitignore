@@ -8,6 +8,7 @@ target/
 *.class
 *.log
 .mvn/wrapper/maven-wrapper.jar
+.jqwik-database
 
 # IDE
 .idea/
