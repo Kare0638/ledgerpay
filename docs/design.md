@@ -125,10 +125,14 @@ Final states are immutable. **A timeout is never a failure** — it means "unkno
 ```
 POST /payments                  capture                         PSP confirms
  ──▶ AUTH_PENDING ──authorised──▶ AUTHORIZED ──────▶ CAPTURE_PENDING ──────▶ CAPTURED ──▶ (partial refunds)
-          │                        │    ▲                   │
-       declined                   void   └── capture failed ─┘
-          ▼                        ▼
-       DECLINED              VOID_PENDING ──PSP confirms──▶ VOIDED
+          │                       │    ▲  ▲                 │
+       declined              void │    │  └─ capture failed─┘
+          ▼                       ▼    │
+       DECLINED           VOID_PENDING─┘ void failed
+                                  │
+                                  │ PSP confirms
+                                  ▼
+                                VOIDED
 ```
 
 | From | Trigger | To |
@@ -137,10 +141,11 @@ POST /payments                  capture                         PSP confirms
 | AUTHORIZED | capture request | CAPTURE_PENDING |
 | AUTHORIZED | void request | VOID_PENDING |
 | CAPTURE_PENDING | captured / explicit failure | CAPTURED / AUTHORIZED |
-| VOID_PENDING | voided | VOIDED |
+| VOID_PENDING | voided / explicit failure | VOIDED / AUTHORIZED |
 | CAPTURED | refund request | unchanged; a Refund is created |
 | anything else | any request | rejected with 409 |
 
+- An explicit PSP rejection of a capture or a void returns the payment to AUTHORIZED. No money moved and the authorisation still holds, so there is no ledger entry; the merchant may retry the void or capture instead. The rejection reason is kept in `psp_operations.last_error` and raises an alert, because card schemes expect unused authorisations to be released promptly. A timeout is **not** a rejection: the payment stays pending until an inquiry settles the outcome (section 9.1).
 - `PaymentStatus.canTransitionTo(target)` is a pure function, unit-tested for every pair.
 - `refund_summary` (NONE / PARTIAL / FULL) is derived from amounts and does not replace the payment status.
 - Stale events cannot move a final state back to pending; `resource_version` decides ordering.
