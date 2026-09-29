@@ -189,9 +189,10 @@ After a full refund the merchant payable can be negative (for example −100p, t
 **Invariants** — enforced in the database and verified by tests:
 1. Every journal has at least two postings that sum to zero, checked at commit by a `DEFERRABLE INITIALLY DEFERRED` constraint trigger. (A row-level CHECK cannot validate a sum across rows.)
 2. Every successful capture or refund has **exactly one** journal: `UNIQUE (psp_operation_id)`. This is the final line of defence against double booking, independent of webhook event IDs.
-3. Journals and postings are **append-only**; triggers reject UPDATE and DELETE. Corrections would be new, linked reversal journals.
+3. Journals and postings are **append-only**: triggers reject UPDATE, DELETE and TRUNCATE, and postings can only be added in the transaction that created their journal, so a committed journal is closed. Corrections would be new, linked reversal journals.
 4. All postings in the system sum to zero; `psp_receivable` = `merchant_payable` + `fee_revenue` (normal-balance view).
 5. Balances are derived from postings. Any balance cache must be updated in the same transaction and have a rebuild-and-compare command.
+6. A posting's currency matches its account's currency, enforced by a composite foreign key on `(account_id, currency)`.
 
 ---
 
@@ -274,26 +275,31 @@ CREATE TABLE idempotency_keys (
 -- V2__ledger.sql
 CREATE TABLE accounts (
     id        TEXT PRIMARY KEY,           -- e.g. 'merchant_payable:m_123'
-    type      TEXT    NOT NULL,           -- ASSET / LIABILITY / REVENUE
-    currency  CHAR(3) NOT NULL
+    type      TEXT    NOT NULL CHECK (type IN ('ASSET', 'LIABILITY', 'REVENUE')),
+    currency  CHAR(3) NOT NULL,
+    UNIQUE (id, currency)                 -- target of the postings (account_id, currency) key
 );
 
 CREATE TABLE journal_entries (
     id                UUID PRIMARY KEY,
     psp_operation_id  UUID        NOT NULL UNIQUE REFERENCES psp_operations(id),
-    entry_type        TEXT        NOT NULL,   -- CAPTURE / REFUND
+    entry_type        TEXT        NOT NULL CHECK (entry_type IN ('CAPTURE', 'REFUND')),
     posted_at         TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
 CREATE TABLE postings (
     id            BIGSERIAL PRIMARY KEY,
     entry_id      UUID    NOT NULL REFERENCES journal_entries(id),
-    account_id    TEXT    NOT NULL REFERENCES accounts(id),
+    account_id    TEXT    NOT NULL,
     amount_minor  BIGINT  NOT NULL CHECK (amount_minor <> 0),
-    currency      CHAR(3) NOT NULL
+    currency      CHAR(3) NOT NULL,
+    FOREIGN KEY (account_id, currency) REFERENCES accounts(id, currency)
 );
 CREATE INDEX idx_postings_account ON postings(account_id);
--- Plus: deferred constraint trigger for journal balance; triggers rejecting UPDATE/DELETE on journals and postings.
+CREATE INDEX idx_postings_entry ON postings(entry_id);
+-- Plus: a deferred constraint trigger for the journal balance (on journal_entries and postings);
+-- triggers rejecting UPDATE, DELETE and TRUNCATE on journals and postings; and a trigger that only
+-- accepts postings from the transaction that created their journal. See the migration for details.
 
 -- V3__messaging.sql
 CREATE TABLE inbox_events (
