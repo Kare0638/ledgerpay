@@ -78,6 +78,8 @@ services:
     environment:
       SERVER_PORT: 8080
       DB_URL: jdbc:postgresql://postgres:5432/mockpsp
+      PSP_WEBHOOK_URL: http://payment-service:8080/webhooks/psp
+      PSP_WEBHOOK_SECRET: dev-only-webhook-secret
     ports:
       - "8081:8080"
     depends_on:

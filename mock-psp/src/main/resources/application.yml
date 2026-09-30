@@ -5,9 +5,24 @@ spring:
     url: ${DB_URL:jdbc:postgresql://localhost:5432/mockpsp}
     username: ${DB_USERNAME:ledgerpay}
     password: ${DB_PASSWORD:ledgerpay}
+  jackson:
+    # The PSP's wire format is snake_case, like the webhook fields in design §9.2.
+    property-naming-strategy: SNAKE_CASE
 
 server:
   port: ${SERVER_PORT:8081}
+
+mockpsp:
+  settle-delay: ${PSP_SETTLE_DELAY:500ms}
+  poll-interval: 200ms
+  batch-size: 20
+  webhook:
+    url: ${PSP_WEBHOOK_URL:http://localhost:8080/webhooks/psp}
+    secret: ${PSP_WEBHOOK_SECRET:dev-only-webhook-secret}
+    connect-timeout: 2s
+    read-timeout: 5s
+    lease: 30s
+    max-attempts: 20
 
 management:
   endpoints:
