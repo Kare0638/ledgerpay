@@ -694,6 +694,34 @@ Four single-fault report variants — duplicated P1 row, missing P3 row, P3 amou
 
 Webhook-to-commit latency is measured separately from API acceptance latency. Results are published with machine specification, data volume and the commit hash of the scripts. Only measured numbers are reported.
 
+### 14.1 Performance analysis (JMH and JFR)
+
+**Virtual threads vs a platform thread pool (JMH).** The `PspOperationWorker` claims up to 20 operations and calls the PSP outside any transaction (section 9.1), so the executor that runs those calls decides how much PSP latency the worker can overlap. A JMH benchmark in a separate `benchmarks` module compares:
+
+- `Executors.newVirtualThreadPerTaskExecutor()`;
+- `Executors.newFixedThreadPool(n)` for n = 10, 50, 200.
+
+Each run dispatches a claimed batch through the real PSP client against an in-process stub PSP with a fixed response delay (0, 20 and 200 ms), then records the result through a bounded HikariCP pool. Parameters: executor, PSP delay, batch size, connection-pool size. Measured: throughput (`Mode.Throughput`) and latency percentiles (`Mode.SampleTime`), plus peak thread count and heap from the JMH GC profiler. Pinning is checked with the JFR event `jdk.VirtualThreadPinned`, because on JDK 21 a virtual thread that blocks inside `synchronized` holds its carrier thread.
+
+The expected result, to be confirmed or refuted by the numbers: virtual threads win when PSP latency dominates, and the gain stops at the connection-pool size, because the pool — not the thread count — bounds concurrent money transactions. The chosen executor and its limits are recorded in ADR 0008.
+
+**Profiling under load (JFR).** The k6 steady-traffic scenario runs against payment-service started with
+
+```bash
+-XX:StartFlightRecording=settings=profile,duration=10m,filename=ledgerpay.jfr
+```
+
+The recording is read with `jfr print` / `jfr summary` and JDK Mission Control:
+
+| Question | JFR events |
+|---|---|
+| How long and how often does GC pause? | `jdk.GarbageCollection`, `jdk.GCPhasePause`, `jdk.GCHeapSummary` |
+| Which locks are contended, and by whom? | `jdk.JavaMonitorEnter`, `jdk.ThreadPark` (with stack traces) |
+| Do virtual threads pin? | `jdk.VirtualThreadPinned` |
+| Where does CPU and allocation go? | `jdk.ExecutionSample`, `jdk.ObjectAllocationSample` |
+
+Findings go into the README's Performance section: GC pause p50 / p99 / max and total pause time, the top contended monitors with their call sites, any change made because of them, and the before/after numbers. Benchmarks and recordings are run on a physical Linux host rather than WSL, whose clock jumps distort timing; the JDK version, JVM flags, CPU, memory and commit hash are published with every number.
+
 ---
 
 ## 15. Deployment
@@ -736,6 +764,7 @@ ledgerpay/
 ├── notification-service/
 ├── mock-psp/                 # simulated PSP, fault injection, settlement export
 ├── load-tests/               # k6 scripts
+├── benchmarks/               # JMH benchmarks
 ├── demo/                     # demo data, report variants, expected results
 ├── infra/
 │   ├── docker-compose.yml
@@ -755,6 +784,7 @@ ledgerpay/
 | 0005 | Refund reservation with pessimistic locking |
 | 0006 | Transactional outbox; at-least-once delivery with idempotent consumers |
 | 0007 | Reconciliation never mutates the ledger; UTC business days |
+| 0008 | Executor for PSP calls: virtual threads vs a platform thread pool, based on the JMH results |
 
 Each ADR records context and constraints, the decision, rejected alternatives, trade-offs and the tests that cover it.
 
@@ -770,5 +800,6 @@ Work is tracked as [GitHub milestones](https://github.com/Kare0638/ledgerpay/mil
 | **M2 — Failure handling and events** | Fault injection; inquiry-first retries and backoff; partial refunds with reservation; outbox, relay, Kafka; notification-service with DLQ; CI with coverage gate; ADR 0001–0006 | AT-06 – AT-14; `docker compose up` runs the full flow |
 | **M3 — Reconciliation and observability** | Settlement export and import; classification; ledger integrity check; demo data and variants; metrics, dashboard, alert rules; ADR 0007 | AT-15 – AT-19; recorded end-to-end demo |
 | **M4 — Performance and cloud** | k6 scenarios; Terraform deployment to AWS; optional SQS adapter and reconciliation assistant | Published load-test results; deployment evidence |
+| **M5 — Performance analysis** | JMH benchmark of PSP dispatch on virtual threads vs a platform thread pool; JFR recording under k6 load, analysed for GC pauses and lock contention; ADR 0008 | Benchmark results and JFR findings in the README (section 14.1) |
 
 Idempotency, inquiry-first retries, refund reservation, database-enforced ledger invariants and reconciliation are the core of the project and are not traded away for schedule.
