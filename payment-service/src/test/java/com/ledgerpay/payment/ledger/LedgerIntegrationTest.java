@@ -40,8 +40,8 @@ class LedgerIntegrationTest {
     merchantId = "m_" + UUID.randomUUID();
     psp = "psp-" + UUID.randomUUID();
     paymentId = UUID.randomUUID();
-    jdbc.sql("INSERT INTO merchants (id, api_key_hash) VALUES (?, 'hash')")
-        .param(merchantId)
+    jdbc.sql("INSERT INTO merchants (id, api_key_hash) VALUES (?, ?)")
+        .params(merchantId, "hash-" + merchantId)
         .update();
     jdbc.sql(
             """

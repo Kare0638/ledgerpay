@@ -6,6 +6,10 @@ spring:
     username: ${DB_USERNAME:ledgerpay}
     password: ${DB_PASSWORD:ledgerpay}
 
+logging:
+  pattern:
+    correlation: "[%X{traceId:-}] "
+
 server:
   port: ${SERVER_PORT:8080}
 

@@ -317,7 +317,7 @@ CREATE TABLE inbox_events (
 CREATE TABLE outbox_events (
     id            UUID PRIMARY KEY,         -- also the message eventId
     aggregate_id  UUID        NOT NULL,     -- paymentId, used as the Kafka key
-    event_type    TEXT        NOT NULL,     -- PaymentAuthorized / PaymentCaptured / RefundSucceeded …
+    event_type    TEXT        NOT NULL,     -- PaymentCreated / PaymentAuthorized / PaymentCaptured / RefundSucceeded …
     payload       JSONB       NOT NULL,
     created_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
     published_at  TIMESTAMPTZ
@@ -387,7 +387,9 @@ CREATE TABLE processed_events (
 
 ## 7. API
 
-Merchants authenticate with `Authorization: Bearer <api-key>`. **The merchant is always taken from the authenticated principal**; a merchant ID in the body can never override it. Operations endpoints use a separate ops key. Resources belonging to another merchant return 404, so existence is not leaked.
+Merchants authenticate with `Authorization: Bearer <api-key>`. The key is stored as its SHA-256 in `merchants.api_key_hash`, which has a unique index. A plain hash is enough because keys are long and random, not passwords. **The merchant is always taken from the authenticated principal**; a merchant ID in the body can never override it. Operations endpoints use a separate ops key. Resources belonging to another merchant return 404, so existence is not leaked.
+
+Every response carries a trace ID in the `X-Trace-Id` header, in the body of 202 responses and in every Problem Details body. It always identifies the current request: stored idempotent responses have no trace ID, and a replay gets its own. Until distributed tracing arrives (section 13), it is generated per request by a servlet filter and put in the logging MDC.
 
 Every write requires an `Idempotency-Key` header.
 
@@ -423,17 +425,19 @@ HTTP/1.1 202 Accepted
 { "paymentId": "…", "status": "AUTH_PENDING", "statusUrl": "/v1/payments/…", "traceId": "…" }
 ```
 
-Errors use RFC 7807 Problem Details with extra `code` and `traceId` fields, and optional `fieldErrors` and `retryAfterSeconds`.
+Errors use RFC 7807 Problem Details with extra `code` and `traceId` fields, and optional `fieldErrors` and `retryAfterSeconds`. **Every** error has a `code`, including Spring MVC's own (malformed JSON, wrong method or media type) and unexpected ones. A **temporary** database failure is 503 `TEMPORARILY_UNAVAILABLE` with a `Retry-After` header: the database is unreachable, a statement times out or deadlocks, a transaction cannot begin, or a commit or rollback fails because the connection was lost mid-transaction (outcome unknown, so the client retries with the same key). The same classification applies in the authentication filter and in the controllers. Any other database error is a bug and returns 500 `INTERNAL_ERROR`. The `Bearer` scheme name is case-insensitive.
 
 | HTTP | code | What the client should do |
 |---|---|---|
 | 400 | VALIDATION_ERROR / INVALID_CSV | Fix the request; nothing was accepted and the key is not consumed |
 | 401 / 403 | UNAUTHENTICATED / FORBIDDEN | Check credentials; do not retry |
 | 404 | RESOURCE_NOT_FOUND | Does not exist or belongs to another merchant |
+| 405 / 406 / 413 / 415 | METHOD_NOT_ALLOWED / NOT_ACCEPTABLE / PAYLOAD_TOO_LARGE / UNSUPPORTED_MEDIA_TYPE | Fix the request; nothing was accepted |
 | 409 | IDEMPOTENCY_IN_PROGRESS | A request with the same key is still running; retry later with the same key |
 | 409 | INVALID_STATE / REFUND_AMOUNT_EXCEEDED / DUPLICATE_REFERENCE | Read the current state before deciding |
 | 422 | IDEMPOTENCY_KEY_REUSED | The key was used for a different request; do not switch keys blindly |
-| 503 | TEMPORARILY_UNAVAILABLE | Retry with the **same** key; do not assume the first call was not accepted |
+| 500 | INTERNAL_ERROR | Unexpected; report the `traceId`. Retrying with the same key is safe |
+| 503 | TEMPORARILY_UNAVAILABLE | Retry with the **same** key after `Retry-After`; do not assume the first call was not accepted |
 
 ---
 
@@ -441,13 +445,13 @@ Errors use RFC 7807 Problem Details with extra `code` and `traceId` fields, and 
 
 Key scope = merchant + operation (`scope`) + key.
 
-1. Insert `idempotency_keys(..., status = 'IN_PROGRESS')`.
+1. Insert `idempotency_keys(..., status = 'IN_PROGRESS')` with `ON CONFLICT DO NOTHING`, in the same transaction as step 2.
    - **Inserted:** new request, continue.
-   - **Unique violation:** read the existing row —
+   - **Conflict:** a concurrent request with the same key waits here until the first one commits or rolls back. Then read the existing row —
      - different `request_hash` → **422**;
      - `COMPLETED` → replay the stored status and body with `Idempotent-Replayed: true`;
      - `IN_PROGRESS` → **409**, retry later.
-2. In **one database transaction**: create or update the business object, write the `psp_operation`, write the outbox event, mark the key `COMPLETED` with the 202 response.
+2. In the **same database transaction**: create or update the business object, write the `psp_operation`, write the outbox event, mark the key `COMPLETED` with the 202 response. Because the key and the work commit together, other requests never see `IN_PROGRESS` in practice; concurrent duplicates wait briefly and then get the replay.
 3. If validation fails and the transaction rolls back, the key rolls back too and can be reused.
 4. The transaction makes **no PSP call**; the worker does that later (section 9), which keeps the transaction short.
 
@@ -460,6 +464,8 @@ Key scope = merchant + operation (`scope`) + key.
 | Ledger | `UNIQUE (journal_entries.psp_operation_id)` | Duplicate webhooks, webhook racing an inquiry |
 
 "Check, then insert" is not enough: under concurrency two requests can both see "not found". Only a database unique constraint guarantees a single winner. Idempotency keys are kept for 24 hours; business references and journal keys are kept permanently.
+
+The request hash is the SHA-256 of the **parsed** request re-serialised with sorted properties, so whitespace, field order and ignored fields do not turn a retry into a 422. A reused `merchantReference` with the same amount returns the existing payment; with a different amount it is 409 `DUPLICATE_REFERENCE`, which rolls back the whole transaction, key included. See [ADR 0002](adr/0002-idempotency-via-database-unique-constraints.md).
 
 ---
 
