@@ -741,13 +741,13 @@ Measured:
 
 The expected result, to be confirmed or refuted by the numbers: virtual threads win when PSP latency dominates, and the gain stops at the connection-pool size, because the pool — not the thread count — bounds concurrent money transactions. The chosen executor and its limits are recorded in ADR 0008.
 
-**Profiling under load (JFR).** The k6 steady-traffic scenario runs against payment-service started with
+**Profiling under load (JFR).** `load-tests/run-jfr.sh` brings up the Compose stack with `infra/docker-compose.perf.yml`, which starts payment-service with
 
 ```bash
--XX:StartFlightRecording=settings=profile,duration=10m,filename=ledgerpay.jfr
+-XX:StartFlightRecording=settings=profile,filename=/tmp/payment-service.jfr,dumponexit=true -Xmx1g
 ```
 
-The recording is read with `jfr print` / `jfr summary` and JDK Mission Control:
+and makes mock-psp settle at once. It then runs the k6 steady scenario (`load-tests/steady.js`: an arrival rate ramping to `RATE` payments per second, each going create → authorised → capture → captured) and stops payment-service so that the recording is written. `load-tests/analyze_jfr.py` reads the recording through `JfrExtract.java` (`jdk.jfr.consumer`). `jfr print --json` with deep stacks would be gigabytes, and without `--stack-depth` it shows only five frames, which hides the waiting site. Parks of idle pool, scheduler and selector threads are left out, so that what remains are waits for a resource, each with its waiting site and thread.
 
 | Question | JFR events |
 |---|---|
@@ -755,6 +755,8 @@ The recording is read with `jfr print` / `jfr summary` and JDK Mission Control:
 | Which locks are contended, and by whom? | `jdk.JavaMonitorEnter`, `jdk.ThreadPark` (with stack traces) |
 | Do virtual threads pin? | `jdk.VirtualThreadPinned` |
 | Where does CPU and allocation go? | `jdk.ExecutionSample`, `jdk.ObjectAllocationSample` |
+
+**Second finding (load).** At 50 payments/s offered, the first recording showed 16.6 payments/s completed and 28 s from create to authorised, while the API answered in 0.9 ms, GC took 0.48 % of the time and no monitor of ours was contended. The scheduler thread's time went into `PspOperationWorker.runOnce`: one batch of 20 per 500 ms poll caps the worker at about 40 PSP operations a second, and the inbox processor shared Spring's single scheduler thread with it. The worker now drains while batches come back full, and each scheduled job has a thread. The recording after the fix kept up with the offered 44.5 payments/s, with authorisation in 1.0 s p50 and 2.0 s p99 (README, Performance).
 
 Findings go into the README's Performance section: GC pause p50 / p99 / max and total pause time, the top contended monitors with their call sites, any change made because of them, and the before/after numbers. Nothing is measured on WSL, whose clock jumps distort timing; the JDK version, JVM flags, CPU, memory and commit hash are published with every number.
 
