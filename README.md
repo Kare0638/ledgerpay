@@ -14,6 +14,7 @@ A payment, double-entry ledger and settlement reconciliation service in Java 21 
 - **Signed webhooks through a persisted inbox**, with de-duplication and quarantine of out-of-order or conflicting events.
 - **Transactional outbox + Kafka** — at-least-once delivery with idempotent consumers and a dead-letter topic; ledger correctness does not depend on the broker.
 - **Settlement reconciliation** — PSP CSV reports matched item by item on a consistent snapshot, with classified breaks; reconciliation never mutates the ledger.
+- **Performance analysis** — JMH benchmark of PSP calls on virtual threads vs a platform thread pool, and a JFR recording under load analysed for GC pauses and lock contention.
 - **Observability and evidence** — Micrometer, Prometheus, Grafana, alert rules, k6 load tests, fault-injection acceptance tests on real PostgreSQL and Kafka via Testcontainers.
 
 ## Architecture
