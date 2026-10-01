@@ -5,6 +5,10 @@ spring:
     url: ${DB_URL:jdbc:postgresql://localhost:5432/ledgerpay}
     username: ${DB_USERNAME:ledgerpay}
     password: ${DB_PASSWORD:ledgerpay}
+  jackson:
+    deserialization:
+      # Amounts are integer minor units: 10.99 must be a 400, not a payment for 10.
+      accept-float-as-int: false
 
 logging:
   pattern:

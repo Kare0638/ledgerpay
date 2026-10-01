@@ -17,6 +17,8 @@ import java.util.concurrent.Future;
 import java.util.stream.Collectors;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.boot.test.web.client.TestRestTemplate;
@@ -351,6 +353,25 @@ class PaymentApiIntegrationTest {
 
     assertThat(response.status()).isEqualTo(400);
     assertThat(response.code()).isEqualTo("VALIDATION_ERROR");
+  }
+
+  @ParameterizedTest
+  @ValueSource(strings = {"10.99", "1050.75", "10.5", "10.0", "1e3"})
+  void fractionalAmountsAre400NotTruncated(String amount) {
+    // Jackson would otherwise truncate 1050.75 to 1050 and accept it; the request hash would be
+    // taken over the truncated value, so a retry with 1050 would replay without anyone noticing.
+    Response response =
+        create(
+            apiKey,
+            "key-1",
+            """
+            {"merchantReference": "order-1", "amountMinor": %s, "currency": "GBP"}"""
+                .formatted(amount));
+
+    assertThat(response.status()).isEqualTo(400);
+    assertThat(response.code()).isEqualTo("VALIDATION_ERROR");
+    assertThat(paymentsFor(merchantId)).isZero();
+    assertThat(create(apiKey, "key-1", body("order-1", 1000)).status()).isEqualTo(202);
   }
 
   @Test
