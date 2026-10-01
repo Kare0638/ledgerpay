@@ -58,6 +58,21 @@ public class PspOperationWorker {
     return claimed.size();
   }
 
+  /**
+   * Claims batches until one comes back less than full, so a backlog is worked off at once. One
+   * batch per poll capped the worker at batch-size per poll interval (40 operations a second by
+   * default), which the load test (#34) hit at about 17 payments a second while the CPU was idle.
+   */
+  public int drain() {
+    int total = 0;
+    int claimed;
+    do {
+      claimed = runOnce();
+      total += claimed;
+    } while (claimed == properties.batchSize() && !Thread.currentThread().isInterrupted());
+    return total;
+  }
+
   void process(ClaimedOperation operation) {
     switch (call(operation)) {
       case PspResult.Accepted accepted ->

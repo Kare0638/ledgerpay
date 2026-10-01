@@ -361,6 +361,21 @@ class PspOperationWorkerIntegrationTest {
   }
 
   @Test
+  void drainWorksOffABacklogLargerThanOneBatch() {
+    // batch-size is 5 in this test: 12 due operations take three claims, all in one drain.
+    List<String> ids = new ArrayList<>();
+    for (int i = 0; i < 12; i++) {
+      ids.add(newAuthorisation(100).pspRequestId());
+    }
+    psp.respond(PspOperationWorkerIntegrationTest::accepting);
+
+    assertThat(worker.drain()).isEqualTo(12);
+
+    assertThat(ids).allSatisfy(id -> assertThat(psp.requestsFor(id)).hasSize(1));
+    assertThat(worker.drain()).isZero();
+  }
+
+  @Test
   void anExpiredLeaseIsReclaimed() {
     Created op = newAuthorisation(10_000);
     // A worker claims the operation and dies before calling the PSP.

@@ -9,6 +9,12 @@ spring:
     deserialization:
       # Amounts are integer minor units: 10.99 must be a 400, not a payment for 10.
       accept-float-as-int: false
+  task:
+    scheduling:
+      pool:
+        # The PSP worker and the inbox processor each get a thread: with Spring's default of one,
+        # webhooks waited behind every batch of PSP calls.
+        size: 2
 
 logging:
   pattern:
