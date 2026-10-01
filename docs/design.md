@@ -724,7 +724,20 @@ Webhook-to-commit latency is measured separately from API acceptance latency. Re
 - `Executors.newVirtualThreadPerTaskExecutor()`;
 - `Executors.newFixedThreadPool(n)` for n = 10, 50, 200.
 
-Each run dispatches a claimed batch through the real PSP client against an in-process stub PSP with a fixed response delay (0, 20 and 200 ms), then records the result through a bounded HikariCP pool. Parameters: executor, PSP delay, batch size, connection-pool size. Measured: throughput (`Mode.Throughput`) and latency percentiles (`Mode.SampleTime`), plus peak thread count and heap from the JMH GC profiler. Pinning is checked with the JFR event `jdk.VirtualThreadPinned`, because on JDK 21 a virtual thread that blocks inside `synchronized` holds its carrier thread.
+Each operation is one `runOnce()` over a freshly seeded batch, through payment-service's own worker, PSP client and SQL, recording each acceptance through a bounded HikariCP pool. The PSP is a stub in **its own JVM**, so that its threads never appear in the benchmark JVM's counts, answering PENDING after a fixed delay (0, 20 and 200 ms) with `TCP_NODELAY` on; without it, Nagle and delayed ACKs added about 40 ms per response and swamped the delay. Parameters: executor, PSP delay, batch size (20, 200), connection-pool size, and the PSP client's HTTP executor (below).
+
+Measured:
+- latency per batch (`Mode.SampleTime`: mean, p50, p99), from a pass without JFR so recording overhead never touches it;
+- threads and heap, from a JFR pass with the same parameters:
+  - `jdk.JavaThreadStatistics` for peak *platform* threads;
+  - `jdk.GCHeapSummary` for heap used after each GC;
+  - `jdk.VirtualThreadStart` and `jdk.VirtualThreadEnd`, off by default and enabled for this pass, giving peak live virtual threads, which platform-thread statistics and `ThreadMXBean` do not include;
+  - `jdk.VirtualThreadPinned`, because on JDK 21 a virtual thread that blocks inside `synchronized` holds its carrier thread.
+- The JMH GC profiler (`-prof gc`) reports allocation rate and GC count and time only, so it is not used for any of these.
+
+**First finding (JFR).** With the virtual-thread executor, peak platform threads were *higher* than with a pool of 10: 2,400 platform threads named `SimpleAsyncTaskExecutor-N` were started in a 4-second recording, one per PSP call. Spring's `JdkClientHttpRequestFactory` writes request bodies on the `HttpClient`'s executor and, when the client has none, falls back to a `SimpleAsyncTaskExecutor` that starts a new platform thread per request, whatever thread made the call. `PspClient` now gives its `HttpClient` a virtual-thread executor. The `httpExecutor` parameter (`virtual`, `spring-default`) keeps the before and after measurable in the same run, and `PspOperationWorkerIntegrationTest` asserts that a batch of calls starts no platform thread per call.
+
+`benchmarks/run.sh` runs every pass and `benchmarks/analyze.py` writes the report. The published numbers come from the `Benchmarks` workflow, run by hand or by labelling a pull request `run-benchmarks`, on a GitHub-hosted runner whose CPU, memory, JDK and commit are written into the report. A shared runner is noisier than a dedicated host, so every comparison is made within one run.
 
 The expected result, to be confirmed or refuted by the numbers: virtual threads win when PSP latency dominates, and the gain stops at the connection-pool size, because the pool — not the thread count — bounds concurrent money transactions. The chosen executor and its limits are recorded in ADR 0008.
 
@@ -743,7 +756,7 @@ The recording is read with `jfr print` / `jfr summary` and JDK Mission Control:
 | Do virtual threads pin? | `jdk.VirtualThreadPinned` |
 | Where does CPU and allocation go? | `jdk.ExecutionSample`, `jdk.ObjectAllocationSample` |
 
-Findings go into the README's Performance section: GC pause p50 / p99 / max and total pause time, the top contended monitors with their call sites, any change made because of them, and the before/after numbers. Benchmarks and recordings are run on a physical Linux host rather than WSL, whose clock jumps distort timing; the JDK version, JVM flags, CPU, memory and commit hash are published with every number.
+Findings go into the README's Performance section: GC pause p50 / p99 / max and total pause time, the top contended monitors with their call sites, any change made because of them, and the before/after numbers. Nothing is measured on WSL, whose clock jumps distort timing; the JDK version, JVM flags, CPU, memory and commit hash are published with every number.
 
 ---
 

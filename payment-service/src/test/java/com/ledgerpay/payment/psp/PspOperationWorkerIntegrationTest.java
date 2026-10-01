@@ -13,6 +13,8 @@ import com.ledgerpay.common.money.Money;
 import com.ledgerpay.payment.PostgresTestcontainersConfiguration;
 import com.ledgerpay.payment.payment.MoneyTransaction;
 import com.ledgerpay.payment.psp.StubPsp.Reply;
+import java.lang.management.ManagementFactory;
+import java.lang.management.ThreadMXBean;
 import java.time.Duration;
 import java.util.ArrayList;
 import java.util.HashSet;
@@ -200,6 +202,28 @@ class PspOperationWorkerIntegrationTest {
     } finally {
       runner.shutdownNow();
     }
+  }
+
+  @Test
+  void pspCallsDoNotStartAPlatformThreadEach() {
+    psp.respond(PspOperationWorkerIntegrationTest::accepting);
+    // A first full batch starts what is started once: the HTTP client's selector, the
+    // virtual-thread carriers and connections in the pool.
+    for (int i = 0; i < 5; i++) {
+      newAuthorisation(100);
+    }
+    worker.runOnce();
+    for (int i = 0; i < 5; i++) {
+      newAuthorisation(100);
+    }
+    ThreadMXBean threads = ManagementFactory.getThreadMXBean();
+    long before = threads.getTotalStartedThreadCount();
+
+    worker.runOnce();
+
+    // Virtual threads are not counted here. Spring's fallback executor starts one per call: 6 for
+    // this batch of 5 when measured, against 0 with the fix.
+    assertThat(threads.getTotalStartedThreadCount() - before).isLessThanOrEqualTo(1);
   }
 
   // --- outcomes ----------------------------------------------------------------------------

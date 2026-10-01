@@ -1,0 +1,61 @@
+name: Benchmarks
+
+# The M5 executor benchmark (design §14.1, #33). Too slow for every push: run it by hand, or by
+# adding the run-benchmarks label to a pull request. The report lands in the job summary.
+on:
+  workflow_dispatch:
+  pull_request:
+    types: [labeled]
+
+jobs:
+  jmh:
+    if: github.event_name == 'workflow_dispatch' || github.event.label.name == 'run-benchmarks'
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: ledgerpay
+          POSTGRES_PASSWORD: ledgerpay
+          POSTGRES_DB: bench
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U ledgerpay -d bench"
+          --health-interval 5s --health-timeout 3s --health-retries 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "21"
+          cache: maven
+
+      - name: Build benchmarks
+        run: ./mvnw -B -pl benchmarks -am package -DskipTests -Dspotless.check.skip=true
+
+      - name: Run benchmarks
+        run: benchmarks/run.sh
+        env:
+          LEDGERPAY_BENCH_JDBC_URL: jdbc:postgresql://localhost:5432/bench
+
+      - name: Publish report
+        run: cat benchmarks/target/results/report.md >> "$GITHUB_STEP_SUMMARY"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: benchmark-results
+          path: |
+            benchmarks/target/results/*.md
+            benchmarks/target/results/*.json
+            benchmarks/target/results/*.txt
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: benchmark-jfr
+          path: |
+            benchmarks/target/results/jfr
+            benchmarks/target/results/jfr-http
+          retention-days: 30

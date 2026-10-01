@@ -43,7 +43,8 @@ public final class StubPsp {
     } catch (IOException e) {
       throw new UncheckedIOException(e);
     }
-    server.setExecutor(Executors.newCachedThreadPool());
+    // Virtual threads: never a bottleneck, and invisible to platform-thread counts in tests.
+    server.setExecutor(Executors.newVirtualThreadPerTaskExecutor());
     server.createContext(
         "/v1/operations",
         exchange -> {
