@@ -4,6 +4,9 @@ import com.fasterxml.jackson.databind.PropertyNamingStrategies;
 import com.fasterxml.jackson.databind.annotation.JsonNaming;
 import java.net.http.HttpClient;
 import java.time.Instant;
+import java.util.concurrent.Executor;
+import java.util.concurrent.Executors;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.http.MediaType;
 import org.springframework.http.client.JdkClientHttpRequestFactory;
 import org.springframework.stereotype.Component;
@@ -36,16 +39,30 @@ public class PspClient {
 
   private final RestClient http;
 
+  @Autowired
   public PspClient(PspProperties properties, RestClient.Builder builder) {
+    this(properties, builder, Executors.newVirtualThreadPerTaskExecutor());
+  }
+
+  /**
+   * @param httpExecutor runs the HTTP client's own tasks, including writing each request body. With
+   *     none, Spring's {@link JdkClientHttpRequestFactory} falls back to a {@code
+   *     SimpleAsyncTaskExecutor}, which starts a new platform thread for every request whatever
+   *     thread made the call: JFR showed one per PSP call (#33). Null only for that benchmark
+   *     baseline.
+   */
+  public PspClient(PspProperties properties, RestClient.Builder builder, Executor httpExecutor) {
     // Not HttpURLConnection: through Spring it reports a read timeout as an unreadable response,
     // hiding that the outcome is unknown, and it may resend a POST when a reused connection fails
     // (sun.net.http.retryPost). Every resubmit here must be a decision the worker made.
     var client =
         HttpClient.newBuilder()
             .version(HttpClient.Version.HTTP_1_1)
-            .connectTimeout(properties.connectTimeout())
-            .build();
-    var requestFactory = new JdkClientHttpRequestFactory(client);
+            .connectTimeout(properties.connectTimeout());
+    if (httpExecutor != null) {
+      client.executor(httpExecutor);
+    }
+    var requestFactory = new JdkClientHttpRequestFactory(client.build());
     requestFactory.setReadTimeout(properties.readTimeout());
     this.http =
         builder.baseUrl(properties.baseUrl().toString()).requestFactory(requestFactory).build();

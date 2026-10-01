@@ -1,0 +1,14 @@
+# Overrides for the JFR load recording (design §14.1, #34):
+#   docker compose -f infra/docker-compose.yml -f infra/docker-compose.perf.yml up --build -d
+# payment-service records with JFR's profile settings and writes the recording when it stops;
+# mock-psp settles at once, so the run measures our service rather than the PSP's delay.
+services:
+  payment-service:
+    environment:
+      JAVA_TOOL_OPTIONS: >-
+        -XX:StartFlightRecording=settings=profile,filename=/tmp/payment-service.jfr,dumponexit=true
+        -Xmx1g
+
+  mock-psp:
+    environment:
+      PSP_SETTLE_DELAY: 0ms

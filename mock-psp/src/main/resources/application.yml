@@ -11,6 +11,10 @@ spring:
     deserialization:
       # Amounts are integer minor units: 10.99 must be a 400, not an operation for 10.
       accept-float-as-int: false
+  task:
+    scheduling:
+      pool:
+        size: 2   # settling and webhook delivery each get a thread
 
 server:
   port: ${SERVER_PORT:8081}

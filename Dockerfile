@@ -7,10 +7,11 @@ COPY common/pom.xml common/
 COPY payment-service/pom.xml payment-service/
 COPY notification-service/pom.xml notification-service/
 COPY mock-psp/pom.xml mock-psp/
+COPY benchmarks/pom.xml benchmarks/
 RUN --mount=type=cache,target=/root/.m2 mvn -B -q -pl ${MODULE} -am dependency:go-offline
 COPY . .
 RUN --mount=type=cache,target=/root/.m2 mvn -B -q -pl ${MODULE} -am package -DskipTests -Dspotless.check.skip=true \
-    && cp ${MODULE}/target/${MODULE}-*.jar /app.jar
+    && cp ${MODULE}/target/${MODULE}-*-exec.jar /app.jar
 
 FROM eclipse-temurin:21-jre
 RUN apt-get update && apt-get install -y --no-install-recommends curl && rm -rf /var/lib/apt/lists/*

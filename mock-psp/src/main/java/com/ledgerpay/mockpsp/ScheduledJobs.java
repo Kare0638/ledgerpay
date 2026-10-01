@@ -15,19 +15,24 @@ class ScheduledJobs {
 
   private final Settler settler;
   private final WebhookDispatcher dispatcher;
+  private final int batchSize;
 
-  ScheduledJobs(Settler settler, WebhookDispatcher dispatcher) {
+  ScheduledJobs(Settler settler, WebhookDispatcher dispatcher, MockPspProperties properties) {
     this.settler = settler;
     this.dispatcher = dispatcher;
+    this.batchSize = properties.batchSize();
   }
+
+  // Both jobs keep going while batches come back full, so the PSP is never what limits a load
+  // test: one batch per poll capped it at batch-size per poll interval.
 
   @Scheduled(fixedDelayString = "${mockpsp.poll-interval}")
   void settle() {
-    settler.settleDue();
+    while (settler.settleDue() == batchSize) {}
   }
 
   @Scheduled(fixedDelayString = "${mockpsp.poll-interval}")
   void dispatch() {
-    dispatcher.dispatchDue();
+    while (dispatcher.dispatchDue() == batchSize) {}
   }
 }

@@ -23,6 +23,7 @@
         <module>payment-service</module>
         <module>notification-service</module>
         <module>mock-psp</module>
+        <module>benchmarks</module>
     </modules>
 
     <properties>
@@ -31,6 +32,7 @@
         <spotless.version>3.10.3</spotless.version>
         <google-java-format.version>1.36.1</google-java-format.version>
         <jqwik.version>1.10.1</jqwik.version>
+        <jmh.version>1.37</jmh.version>
     </properties>
 
     <dependencyManagement>
@@ -38,6 +40,11 @@
             <dependency>
                 <groupId>com.ledgerpay</groupId>
                 <artifactId>common</artifactId>
+                <version>${project.version}</version>
+            </dependency>
+            <dependency>
+                <groupId>com.ledgerpay</groupId>
+                <artifactId>payment-service</artifactId>
                 <version>${project.version}</version>
             </dependency>
             <dependency>
@@ -49,6 +56,19 @@
     </dependencyManagement>
 
     <build>
+        <pluginManagement>
+            <plugins>
+                <!-- The runnable jar gets an -exec suffix, so the plain jar stays usable as a
+                     dependency (the benchmarks module builds on payment-service's classes). -->
+                <plugin>
+                    <groupId>org.springframework.boot</groupId>
+                    <artifactId>spring-boot-maven-plugin</artifactId>
+                    <configuration>
+                        <classifier>exec</classifier>
+                    </configuration>
+                </plugin>
+            </plugins>
+        </pluginManagement>
         <plugins>
             <plugin>
                 <groupId>com.diffplug.spotless</groupId>

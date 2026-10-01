@@ -5,7 +5,7 @@ import org.springframework.scheduling.annotation.EnableScheduling;
 import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Component;
 
-/** Runs the worker on a schedule. Tests turn it off and call {@link PspOperationWorker#runOnce}. */
+/** Runs the worker on a schedule. Tests turn it off and drive the worker directly. */
 @Component
 @EnableScheduling
 @ConditionalOnProperty(name = "ledgerpay.psp.worker.enabled", matchIfMissing = true)
@@ -19,6 +19,6 @@ class PspWorkerJob {
 
   @Scheduled(fixedDelayString = "${ledgerpay.psp.poll-interval}")
   void run() {
-    worker.runOnce();
+    worker.drain();
   }
 }
