@@ -61,6 +61,34 @@ public class PaymentService {
     return payments.find(merchantId, id).orElseThrow();
   }
 
+  /**
+   * Starts a capture of the full authorised amount (partial capture is out of scope): AUTHORIZED
+   * becomes CAPTURE_PENDING and a pending CAPTURE operation is written. The payment is locked, so
+   * of two concurrent captures one proceeds and the other finds CAPTURE_PENDING and gets 409.
+   */
+  @Transactional(propagation = Propagation.MANDATORY)
+  public Optional<Payment> capture(String merchantId, UUID id) {
+    return request(merchantId, id, PaymentStatus.CAPTURE_PENDING, PspOperationType.CAPTURE);
+  }
+
+  /** Starts releasing the authorisation: AUTHORIZED becomes VOID_PENDING. */
+  @Transactional(propagation = Propagation.MANDATORY)
+  public Optional<Payment> voidPayment(String merchantId, UUID id) {
+    return request(merchantId, id, PaymentStatus.VOID_PENDING, PspOperationType.VOID);
+  }
+
+  private Optional<Payment> request(
+      String merchantId, UUID id, PaymentStatus target, PspOperationType type) {
+    Optional<Payment> locked = payments.lock(merchantId, id);
+    if (locked.isEmpty()) {
+      return Optional.empty();
+    }
+    Payment payment = locked.get();
+    payments.update(id, payment.status().transitionTo(target), payment.captured());
+    pspOperations.createPending(id, type, payment.amount());
+    return payments.find(merchantId, id);
+  }
+
   public Optional<Payment> find(String merchantId, UUID id) {
     return payments.find(merchantId, id);
   }

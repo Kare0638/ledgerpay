@@ -15,20 +15,20 @@ import java.util.function.Function;
  * A scriptable PSP: records every request and answers with whatever the test sets. Requests are
  * served concurrently, like a real PSP, so slow replies do not queue behind each other.
  */
-final class StubPsp {
+public final class StubPsp {
 
-  record Request(String method, String path, String body) {
-    boolean isSubmit() {
+  public record Request(String method, String path, String body) {
+    public boolean isSubmit() {
       return method.equals("POST");
     }
 
-    boolean mentions(String pspRequestId) {
+    public boolean mentions(String pspRequestId) {
       return path.endsWith("/" + pspRequestId) || body.contains("\"" + pspRequestId + "\"");
     }
   }
 
-  record Reply(int status, String body, Duration delay) {
-    static Reply of(int status, String body) {
+  public record Reply(int status, String body, Duration delay) {
+    public static Reply of(int status, String body) {
       return new Reply(status, body, Duration.ZERO);
     }
   }
@@ -37,7 +37,7 @@ final class StubPsp {
   private final List<Request> requests = new CopyOnWriteArrayList<>();
   private volatile Function<Request, Reply> responder = request -> Reply.of(500, "");
 
-  StubPsp() {
+  public StubPsp() {
     try {
       server = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
     } catch (IOException e) {
@@ -70,25 +70,25 @@ final class StubPsp {
     server.start();
   }
 
-  String url() {
+  public String url() {
     return "http://127.0.0.1:" + server.getAddress().getPort();
   }
 
-  void respond(Function<Request, Reply> responder) {
+  public void respond(Function<Request, Reply> responder) {
     this.responder = responder;
   }
 
-  void reset() {
+  public void reset() {
     requests.clear();
     responder = request -> Reply.of(500, "");
   }
 
-  List<Request> requestsFor(String pspRequestId) {
+  public List<Request> requestsFor(String pspRequestId) {
     return requests.stream().filter(r -> r.mentions(pspRequestId)).toList();
   }
 
   /** A mock-psp operation body (design §9.4). */
-  static String operation(String pspRequestId, String pspReference, String status) {
+  public static String operation(String pspRequestId, String pspReference, String status) {
     String succeededAt = status.equals("SUCCEEDED") ? "\"2026-10-01T09:00:00Z\"" : "null";
     String failure = status.equals("FAILED") ? "\"AMOUNT_MISMATCH\"" : "null";
     return """

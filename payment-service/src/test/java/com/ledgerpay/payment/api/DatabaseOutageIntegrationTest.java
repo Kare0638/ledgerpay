@@ -6,6 +6,8 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.ledgerpay.payment.idempotency.IdempotentExecutor;
+import com.ledgerpay.payment.webhook.SignedWebhooks;
+import com.ledgerpay.payment.webhook.SignedWebhooks.Event;
 import java.util.Optional;
 import java.util.UUID;
 import org.junit.jupiter.api.BeforeEach;
@@ -38,7 +40,8 @@ import org.testcontainers.junit.jupiter.Testcontainers;
     webEnvironment = SpringBootTest.WebEnvironment.RANDOM_PORT,
     properties = {
       "spring.datasource.hikari.connection-timeout=1000",
-      "spring.datasource.hikari.validation-timeout=250"
+      "spring.datasource.hikari.validation-timeout=250",
+      "ledgerpay.psp.webhook-secret=" + SignedWebhooks.SECRET
     })
 @Testcontainers
 class DatabaseOutageIntegrationTest {
@@ -146,5 +149,13 @@ class DatabaseOutageIntegrationTest {
 
     assertTemporarilyUnavailable(
         exchange(HttpMethod.GET, "/v1/payments/" + UUID.randomUUID(), null));
+  }
+
+  @Test
+  void aWebhookIsNotAcknowledgedWhileItCannotBeStored() throws Exception {
+    // 503 makes the PSP redeliver; a 200 here would lose the event (design §9.2).
+    Event event = Event.of("AUTHORIZE", "req_outage", "m_outage", 100, "SUCCEEDED");
+
+    assertTemporarilyUnavailable(SignedWebhooks.send(rest, event.json()));
   }
 }

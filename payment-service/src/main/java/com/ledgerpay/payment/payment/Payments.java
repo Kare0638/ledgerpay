@@ -63,6 +63,47 @@ public class Payments {
         .optional();
   }
 
+  /** Locks the payment for a money decision; payments are always locked before operations. */
+  @Transactional(propagation = Propagation.MANDATORY)
+  public Optional<Payment> lock(UUID id) {
+    return jdbc.sql("SELECT " + COLUMNS + " FROM payments WHERE id = ? FOR UPDATE")
+        .param(id)
+        .query(Payments::map)
+        .optional();
+  }
+
+  /** As {@link #lock(UUID)}, scoped to the merchant: another merchant's payment is not found. */
+  @Transactional(propagation = Propagation.MANDATORY)
+  public Optional<Payment> lock(String merchantId, UUID id) {
+    return jdbc.sql(
+            "SELECT " + COLUMNS + " FROM payments WHERE merchant_id = ? AND id = ? FOR UPDATE")
+        .params(merchantId, id)
+        .query(Payments::map)
+        .optional();
+  }
+
+  /** Writes a new status and captured amount for a payment the caller has locked. */
+  @Transactional(propagation = Propagation.MANDATORY)
+  public void update(UUID id, PaymentStatus status, Money captured) {
+    jdbc.sql(
+            """
+            UPDATE payments
+               SET status = :status, captured_minor = :captured,
+                   version = version + 1, updated_at = now()
+             WHERE id = :id""")
+        .param("status", status.name())
+        .param("captured", captured.minor())
+        .param("id", id)
+        .update();
+  }
+
+  public int feeBps(String merchantId) {
+    return jdbc.sql("SELECT fee_bps FROM merchants WHERE id = ?")
+        .param(merchantId)
+        .query(Integer.class)
+        .single();
+  }
+
   private static Payment map(ResultSet rs, int row) throws SQLException {
     Currency currency = Currency.getInstance(rs.getString("currency"));
     return new Payment(

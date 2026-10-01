@@ -2,7 +2,12 @@ package com.ledgerpay.payment.psp;
 
 import com.ledgerpay.common.money.Money;
 import java.time.Duration;
+import java.time.Instant;
+import java.time.OffsetDateTime;
+import java.time.ZoneOffset;
+import java.util.Currency;
 import java.util.List;
+import java.util.Optional;
 import java.util.UUID;
 import org.springframework.jdbc.core.simple.JdbcClient;
 import org.springframework.stereotype.Repository;
@@ -117,6 +122,85 @@ public class PspOperations {
   public void recordError(UUID id, String error) {
     jdbc.sql("UPDATE psp_operations SET last_error = ?, updated_at = now() WHERE id = ?")
         .params(error.length() <= 1000 ? error : error.substring(0, 1000), id)
+        .update();
+  }
+
+  /** An operation as the money transaction sees it. */
+  public record OperationRow(
+      UUID id,
+      UUID paymentId,
+      PspOperationType type,
+      String pspRequestId,
+      Money amount,
+      String status,
+      String pspReference,
+      int resourceVersion) {
+
+    public boolean isFinal() {
+      return !status.equals("PENDING");
+    }
+  }
+
+  /**
+   * The payment an operation belongs to, read without a lock so the payment can be locked first.
+   */
+  public Optional<UUID> paymentIdOf(String pspRequestId) {
+    return jdbc.sql("SELECT payment_id FROM psp_operations WHERE psp_request_id = ?")
+        .param(pspRequestId)
+        .query(UUID.class)
+        .optional();
+  }
+
+  /** Locks the operation; the caller already holds the lock on its payment. */
+  @Transactional(propagation = Propagation.MANDATORY)
+  public OperationRow lock(String pspRequestId) {
+    return jdbc.sql(
+            """
+            SELECT id, payment_id, type, psp_request_id, amount_minor, currency, status,
+                   psp_reference, resource_version
+              FROM psp_operations WHERE psp_request_id = ? FOR UPDATE""")
+        .param(pspRequestId)
+        .query(
+            (rs, row) ->
+                new OperationRow(
+                    rs.getObject("id", UUID.class),
+                    rs.getObject("payment_id", UUID.class),
+                    PspOperationType.valueOf(rs.getString("type")),
+                    rs.getString("psp_request_id"),
+                    Money.of(
+                        rs.getLong("amount_minor"), Currency.getInstance(rs.getString("currency"))),
+                    rs.getString("status"),
+                    rs.getString("psp_reference"),
+                    rs.getInt("resource_version")))
+        .single();
+  }
+
+  /**
+   * Records the PSP's final answer on a locked operation. A rejection keeps its reason in {@code
+   * last_error}, which raises an alert (design §5.3).
+   */
+  @Transactional(propagation = Propagation.MANDATORY)
+  public void complete(
+      UUID id,
+      boolean succeeded,
+      String pspReference,
+      Instant succeededAt,
+      int resourceVersion,
+      String failureReason) {
+    jdbc.sql(
+            """
+            UPDATE psp_operations
+               SET status = :status, psp_reference = :reference, succeeded_at = :succeededAt,
+                   resource_version = :version, last_error = :error,
+                   lease_until = NULL, updated_at = now()
+             WHERE id = :id""")
+        .param("status", succeeded ? "SUCCEEDED" : "FAILED")
+        .param("reference", pspReference)
+        .param(
+            "succeededAt", succeeded ? OffsetDateTime.ofInstant(succeededAt, ZoneOffset.UTC) : null)
+        .param("version", resourceVersion)
+        .param("error", succeeded ? null : "PSP rejected: " + failureReason)
+        .param("id", id)
         .update();
   }
 }
