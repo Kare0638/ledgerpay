@@ -716,7 +716,15 @@ Webhook-to-commit latency is measured separately from API acceptance latency. Re
 - `Executors.newVirtualThreadPerTaskExecutor()`;
 - `Executors.newFixedThreadPool(n)` for n = 10, 50, 200.
 
-Each run dispatches a claimed batch through the real PSP client against an in-process stub PSP with a fixed response delay (0, 20 and 200 ms), then records the result through a bounded HikariCP pool. Parameters: executor, PSP delay, batch size, connection-pool size. Measured: throughput (`Mode.Throughput`) and latency percentiles (`Mode.SampleTime`), plus peak thread count and heap from the JMH GC profiler. Pinning is checked with the JFR event `jdk.VirtualThreadPinned`, because on JDK 21 a virtual thread that blocks inside `synchronized` holds its carrier thread.
+Each run dispatches a claimed batch through the real PSP client against an in-process stub PSP with a fixed response delay (0, 20 and 200 ms), then records the result through a bounded HikariCP pool. Parameters: executor, PSP delay, batch size, connection-pool size. Measured:
+- throughput (`Mode.Throughput`) and latency percentiles (`Mode.SampleTime`);
+- allocation rate and GC count and time, from the JMH GC profiler (`-prof gc`), which reports nothing about threads or heap occupancy;
+- threads and heap, from a JFR recording of the same run:
+  - `jdk.JavaThreadStatistics` for live and peak *platform* threads;
+  - `jdk.GCHeapSummary` for heap used after each GC;
+  - `jdk.VirtualThreadStart` and `jdk.VirtualThreadEnd`, off by default and enabled for this run, to count virtual threads, which platform-thread statistics and `ThreadMXBean` do not include.
+
+Pinning is checked in the same recording with `jdk.VirtualThreadPinned`, because on JDK 21 a virtual thread that blocks inside `synchronized` holds its carrier thread.
 
 The expected result, to be confirmed or refuted by the numbers: virtual threads win when PSP latency dominates, and the gain stops at the connection-pool size, because the pool — not the thread count — bounds concurrent money transactions. The chosen executor and its limits are recorded in ADR 0008.
 
