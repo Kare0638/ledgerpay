@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Records payment-service with JFR under the k6 steady scenario (design §14.1, #34) and writes
-# load-tests/target/report.md. RATE (payments/s), RAMP and HOLD tune the load.
+# load-tests/target/report.md. RATE (payments/s), RAMP and HOLD tune the load; ANALYZE=false
+# stops after recording, so CI can upload the raw files before the analysis runs.
 #
 #   load-tests/run-jfr.sh
 #
@@ -40,6 +41,7 @@ docker run --rm --network ledgerpay_default \
   -v "$PWD/load-tests:/scripts:ro" -v "$PWD/$OUT:/out" \
   "$K6_IMAGE" run --quiet --summary-export /out/k6-summary.json /scripts/steady.js | tee "$OUT/k6.txt"
 
+echo "Stopping payment-service to write the recording"
 # A normal shutdown makes the JVM write the recording (dumponexit).
 "${COMPOSE[@]}" stop -t 60 payment-service
 docker cp "$("${COMPOSE[@]}" ps -aq payment-service):/tmp/payment-service.jfr" "$OUT/payment-service.jfr"
@@ -48,4 +50,7 @@ docker cp "$("${COMPOSE[@]}" ps -aq payment-service):/tmp/payment-service.jfr" "
   "SELECT status, count(*) FROM payments GROUP BY status ORDER BY status" > "$OUT/payment-states.txt"
 "${COMPOSE[@]}" down -v > /dev/null 2>&1
 
-python3 load-tests/analyze_jfr.py "$OUT"
+echo "Recording: $(du -h "$OUT/payment-service.jfr" | cut -f1)"
+if [[ "${ANALYZE:-true}" == true ]]; then
+  python3 load-tests/analyze_jfr.py "$OUT"
+fi

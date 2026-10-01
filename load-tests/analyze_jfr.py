@@ -52,13 +52,26 @@ def fmt(value, pattern="{:.1f}"):
 
 
 def load(recording):
+    """Streams the extractor's output, keeping only what the report needs: under heavy load a
+    recording holds millions of parks, far too many to hold as objects."""
     extractor = pathlib.Path(__file__).with_name("JfrExtract.java")
-    out = subprocess.run(["java", str(extractor), str(recording)], check=True, capture_output=True,
-                         text=True).stdout
     events = collections.defaultdict(list)
-    for line in out.splitlines():
-        event = Event(line)
-        events[event.type].append(event)
+    idle = 0
+    with subprocess.Popen(["java", str(extractor), str(recording)], stdout=subprocess.PIPE,
+                          text=True, bufsize=1 << 20) as extract:
+        for line in extract.stdout:
+            event = Event(line)
+            if event.type == "jdk.ThreadPark" and any(n.startswith(IDLE) for n in event.frames):
+                idle += 1
+                continue
+            if event.type in ("jdk.ThreadPark", "jdk.JavaMonitorEnter"):
+                event.frames = [caller(event.frames)]
+            elif event.type == "jdk.ExecutionSample":
+                event.frames = event.frames[:1]
+            events[event.type].append(event)
+    if extract.returncode:
+        raise SystemExit(f"JfrExtract failed with exit code {extract.returncode}")
+    events["idle_parks"] = idle
     summary = subprocess.run(["jfr", "summary", str(recording)], check=True, capture_output=True,
                              text=True).stdout
     seconds = float(re.search(r"Duration: (\d+) s", summary).group(1))
@@ -97,11 +110,8 @@ def monitor_section(events):
 
 def park_section(events):
     grouped = collections.defaultdict(list)
-    idle = 0
+    idle = events["idle_parks"]
     for event in events["jdk.ThreadPark"]:
-        if any(n.startswith(IDLE) for n in event.frames):
-            idle += 1
-            continue
         thread = re.sub(r"\d+", "N", event.thread)
         grouped[(event.subject, caller(event.frames), thread)].append(event.ms)
     lines = ["## Parked threads waiting for a resource (`jdk.ThreadPark`, ≥ 10 ms)", "",

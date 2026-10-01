@@ -77,13 +77,24 @@ jobs:
 
       - name: Record payment-service under load
         run: load-tests/run-jfr.sh
+        env:
+          ANALYZE: "false"
 
-      - name: Publish report
-        run: cat load-tests/target/report.md >> "$GITHUB_STEP_SUMMARY"
-
+      # Raw recording, k6 summary and logs first, so a failed analysis loses nothing.
       - uses: actions/upload-artifact@v4
         if: always()
         with:
           name: load-jfr
           path: load-tests/target
           retention-days: 30
+
+      - name: Analyse the recording
+        run: python3 load-tests/analyze_jfr.py load-tests/target
+
+      - name: Publish report
+        run: cat load-tests/target/report.md >> "$GITHUB_STEP_SUMMARY"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: load-jfr-report
+          path: load-tests/target/report.md

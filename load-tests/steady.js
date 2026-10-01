@@ -66,13 +66,15 @@ export default function () {
   toCaptured.add(Date.now() - started);
 }
 
+// Polls once a second, as a client would while waiting for a webhook. Faster polling turns into
+// most of the load as soon as confirmations slow down, and the test then measures itself.
 function waitFor(id, status, headers) {
-  for (let i = 0; i < 150; i++) {
+  for (let i = 0; i < 120; i++) {
     const r = http.get(`${BASE}/v1/payments/${id}`, { headers, tags: { name: 'poll' } });
     if (r.status === 200 && r.json('status') === status) {
       return true;
     }
-    sleep(0.2);
+    sleep(1);
   }
   return false;
 }
