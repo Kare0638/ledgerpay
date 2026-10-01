@@ -533,6 +533,21 @@ The two partial failures:
 
 A separate Spring Boot service with its own schema. Endpoints: submit an operation (idempotent on `psp_request_id`; same ID with different parameters is rejected), inquire by request ID, export a daily settlement CSV.
 
+The wire format is snake_case JSON; errors are Problem Details with a `code`.
+
+| Method | Path | Result |
+|---|---|---|
+| POST | `/v1/operations` | **201** new operation; **200** repeat with the same parameters, returning its current state; **409** `REQUEST_ID_CONFLICT` same ID with different parameters; **422** `INVALID_REFERENCE` unknown parent, wrong parent type or another merchant's; **400** `INVALID_REQUEST` |
+| GET | `/v1/operations/{psp_request_id}` | **200** current state; **404** `NOT_FOUND` — the only answer that allows a resubmit (section 9.1) |
+
+Submit body: `psp_request_id`, `merchant_id`, `type`, `parent_reference`, `amount_minor`, `currency`. Capture and void name the authorisation's `psp_reference` as parent, a refund names the capture's, and an authorisation has none. The response is the operation: the same fields plus `psp_reference`, `status`, `failure_reason`, `resource_version`, `created_at`, `succeeded_at`.
+
+- **Accepted** operations are `PENDING` and succeed after `mockpsp.settle-delay`; the outcome and its webhook are written in one transaction.
+- **Declined** operations are recorded as `FAILED` at once, with a `failure_reason`, and reported by webhook like any outcome: parent not succeeded, amount or currency differs from the authorisation (no partial capture), authorisation already captured or voided, or refunds exceeding the capture. Nothing is recorded for a 4xx.
+- Decisions about one parent take its row lock, so concurrent captures or refunds cannot both pass the checks; a partial unique index also allows at most one pending or successful capture or void per authorisation.
+- A trigger rejects any update to an operation already in a final state.
+- **Webhooks** are stored with their exact body and sent by a poller outside any transaction, signed at send time (section 9.2). Anything other than a 2xx is retried after 1, 2, 4 … s, up to 60 s, for up to 20 attempts; a redelivery has the same `event_id` and body and a fresh timestamp and signature. `event_type` is `<type>.<status>`, e.g. `capture.succeeded`.
+
 Fault injection (dev profile only):
 
 | Fault | Verifies |
