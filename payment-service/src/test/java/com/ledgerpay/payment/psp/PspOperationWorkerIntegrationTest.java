@@ -11,6 +11,7 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.ledgerpay.common.money.Money;
 import com.ledgerpay.payment.PostgresTestcontainersConfiguration;
+import com.ledgerpay.payment.payment.MoneyTransaction;
 import com.ledgerpay.payment.psp.StubPsp.Reply;
 import java.time.Duration;
 import java.util.ArrayList;
@@ -57,7 +58,7 @@ class PspOperationWorkerIntegrationTest {
   @Autowired JdbcClient jdbc;
   @Autowired TransactionTemplate tx;
   @Autowired ObjectMapper json;
-  @MockitoBean PspOutcomeHandler outcomes;
+  @MockitoBean MoneyTransaction outcomes;
 
   String merchant;
 

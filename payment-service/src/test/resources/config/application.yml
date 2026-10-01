@@ -1,6 +1,9 @@
-# Loaded on top of the main application.yml in tests. The PSP worker is driven explicitly, so
-# tests that only use the API never call a PSP in the background.
+# Loaded on top of the main application.yml in tests. The PSP worker and the inbox processor are
+# driven explicitly, so nothing runs in the background behind a test.
 ledgerpay:
   psp:
     worker:
+      enabled: false
+  inbox:
+    processor:
       enabled: false

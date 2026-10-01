@@ -9,6 +9,7 @@ import com.ledgerpay.payment.payment.Payment;
 import com.ledgerpay.payment.payment.PaymentService;
 import jakarta.validation.Valid;
 import java.util.Currency;
+import java.util.Optional;
 import java.util.UUID;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
@@ -26,6 +27,8 @@ import org.springframework.web.bind.annotation.RestController;
 public class PaymentController {
 
   static final String CREATE_SCOPE = "POST /v1/payments";
+  static final String CAPTURE_SCOPE = "POST /v1/payments/{id}/capture";
+  static final String VOID_SCOPE = "POST /v1/payments/{id}/void";
   static final String IDEMPOTENCY_KEY = "Idempotency-Key";
   static final int MAX_KEY_LENGTH = 255;
 
@@ -44,21 +47,63 @@ public class PaymentController {
       @Valid @RequestBody CreatePaymentRequest request) {
     requireValidKey(key);
     Money amount = Money.positive(request.amountMinor(), Currency.getInstance(request.currency()));
-
-    IdempotentResponse response =
+    return respond(
         idempotency.execute(
             merchant.id(),
             CREATE_SCOPE,
             key,
             request,
-            () -> {
-              Payment payment = payments.create(merchant.id(), request.merchantReference(), amount);
-              return new IdempotentExecutor.Result(
-                  HttpStatus.ACCEPTED.value(),
-                  new CreatePaymentResponse(
-                      payment.id(), payment.status().name(), "/v1/payments/" + payment.id()));
-            });
+            () -> accepted(payments.create(merchant.id(), request.merchantReference(), amount))));
+  }
 
+  @PostMapping("/{id}/capture")
+  ResponseEntity<JsonNode> capture(
+      @RequestAttribute(AuthenticatedMerchant.REQUEST_ATTRIBUTE) AuthenticatedMerchant merchant,
+      @RequestHeader(IDEMPOTENCY_KEY) String key,
+      @PathVariable UUID id) {
+    requireValidKey(key);
+    return respond(
+        idempotency.execute(
+            merchant.id(),
+            CAPTURE_SCOPE,
+            key,
+            new PaymentAction(id),
+            () -> accepted(found(id, payments.capture(merchant.id(), id)))));
+  }
+
+  @PostMapping("/{id}/void")
+  ResponseEntity<JsonNode> voidPayment(
+      @RequestAttribute(AuthenticatedMerchant.REQUEST_ATTRIBUTE) AuthenticatedMerchant merchant,
+      @RequestHeader(IDEMPOTENCY_KEY) String key,
+      @PathVariable UUID id) {
+    requireValidKey(key);
+    return respond(
+        idempotency.execute(
+            merchant.id(),
+            VOID_SCOPE,
+            key,
+            new PaymentAction(id),
+            () -> accepted(found(id, payments.voidPayment(merchant.id(), id)))));
+  }
+
+  /**
+   * What a capture or void request is, for the request hash: the same key reused for another
+   * payment is a different request (422), not a replay of the first payment's response.
+   */
+  record PaymentAction(UUID paymentId) {}
+
+  private static Payment found(UUID id, Optional<Payment> payment) {
+    return payment.orElseThrow(() -> new ResourceNotFoundException("Payment " + id));
+  }
+
+  private static IdempotentExecutor.Result accepted(Payment payment) {
+    return new IdempotentExecutor.Result(
+        HttpStatus.ACCEPTED.value(),
+        new PaymentAcceptedResponse(
+            payment.id(), payment.status().name(), "/v1/payments/" + payment.id()));
+  }
+
+  private static ResponseEntity<JsonNode> respond(IdempotentResponse response) {
     // The stored body has no trace ID: this response gets the current one, matching X-Trace-Id.
     ObjectNode body = response.body().deepCopy();
     body.put("traceId", TraceIds.current());

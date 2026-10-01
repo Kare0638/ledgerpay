@@ -61,6 +61,7 @@ services:
       SERVER_PORT: 8080
       DB_URL: jdbc:postgresql://postgres:5432/ledgerpay
       PSP_BASE_URL: http://mock-psp:8080
+      PSP_WEBHOOK_SECRET: dev-only-webhook-secret
     ports:
       - "8080:8080"
     depends_on:

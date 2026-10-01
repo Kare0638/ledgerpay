@@ -26,6 +26,10 @@ ledgerpay:
     batch-size: 20
     poll-interval: 500ms
     safety-net-delay: 15m
+    provider: mock-psp
+    webhook-secret: ${PSP_WEBHOOK_SECRET:dev-only-webhook-secret}
+  inbox:
+    poll-interval: 200ms
 
 management:
   endpoints:

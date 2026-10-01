@@ -510,6 +510,12 @@ If a worker dies mid-flight, the lease expires and another worker picks the oper
 
 Webhook fields: `event_id`, `event_type`, `psp_request_id`, `psp_reference`, `merchant_id`, `amount_minor`, `currency`, `status`, `occurred_at`, `resource_version`.
 
+Implementation notes:
+- The operation type comes from `event_type` (`capture.succeeded` → CAPTURE), and only final statuses are accepted.
+- `payload_hash` is the SHA-256 of the raw body, so "same payload" means byte for byte. A conflicting body under a known `event_id` is logged at ERROR and acknowledged; the stored original is never changed.
+- `InboxProcessor` claims one RECEIVED event at a time with `FOR UPDATE SKIP LOCKED` and marks it PROCESSED or QUARANTINED in the same transaction as the money transaction, so it is applied exactly once.
+- A temporary database failure leaves the event RECEIVED for the next poll. Any other exception would fail the same way forever, so the event is quarantined with the error instead of being retried.
+
 ### 9.3 The money transaction (shared by webhooks and inquiries)
 
 ```
@@ -528,6 +534,8 @@ COMMIT      -- the deferred balance constraint is checked here
 The two partial failures:
 - **PSP succeeded, local commit failed:** nothing was written; the webhook redelivery or safety-net inquiry re-runs the transaction.
 - **Local commit succeeded, the 200 never reached the PSP:** the PSP redelivers; the "same final state" branch returns without side effects.
+
+Before anything changes, the event must match the operation: merchant (from the payment), operation type, amount and currency, and the `psp_reference` once one is known. A mismatch, an unknown `psp_request_id` or a contradiction of a final state is quarantined. Inquiries use the same transaction (`MoneyTransaction`) with the operation's own fields, so a webhook and an inquiry for one outcome serialise on the payment and operation locks; whichever comes second finds it already applied. Should the locks ever fail, `UNIQUE (psp_operation_id)` still allows only one journal.
 
 ### 9.4 mock-psp
 
