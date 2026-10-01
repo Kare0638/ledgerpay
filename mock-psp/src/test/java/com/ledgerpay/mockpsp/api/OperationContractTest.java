@@ -252,6 +252,22 @@ class OperationContractTest {
   }
 
   @Test
+  void fractionalAmountsAreRejectedNotTruncated() {
+    String requestId = newRequestId();
+
+    Response response =
+        submit(
+            """
+            {"psp_request_id": "%s", "merchant_id": "%s", "type": "AUTHORIZE",
+             "amount_minor": 1050.75, "currency": "GBP"}"""
+                .formatted(requestId, merchant));
+
+    assertThat(response.status()).isEqualTo(400);
+    assertThat(response.field("code")).isEqualTo("INVALID_REQUEST");
+    assertThat(count("operations", "psp_request_id", requestId)).isZero();
+  }
+
+  @Test
   void unknownOrForeignParentIsRejectedAndNothingIsRecorded() {
     String authorisation = authorised(10_000);
     String unknown = newRequestId();
