@@ -575,7 +575,7 @@ Faults are selected through `POST /_admin/faults` with `{merchant_id, type?, fau
 | `TIMEOUT_AFTER_COMMIT` | Commits the operation, which succeeds as usual, then holds the submit response for `mockpsp.faults.response-delay` (10 s), beyond the caller's read timeout |
 | `DROP_WEBHOOK` | Settles without queueing any webhook |
 | `DUPLICATE_WEBHOOK` | Sends the outcome 10 times under one event ID, and once each under two more event IDs |
-| `OUT_OF_ORDER` | After the outcome, sends the operation's PENDING event with the previous `resource_version`, due `stale-event-delay` (1 s) later |
+| `OUT_OF_ORDER` | After the outcome, sends the operation's PENDING event with the previous `resource_version`, due `stale-event-delay` (1 s) later and never before the outcome is delivered; none for an operation that failed when submitted, which was never PENDING |
 | `DELAY_WEBHOOK` | Sends the outcome after `webhook-delay` (30 s) |
 
 `MockPspFaults` (mock-psp tests) configures faults from any test over plain HTTP.

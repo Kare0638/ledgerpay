@@ -256,6 +256,56 @@ class FaultInjectionTest {
   }
 
   @Test
+  void outOfOrderHoldsTheStaleEventBackUntilTheOutcomeIsDelivered() throws Exception {
+    faults.inject(merchant, "AUTHORIZE", "OUT_OF_ORDER");
+    String requestId = newRequestId();
+    receiver.failWhenBodyContains("authorize.succeeded");
+    try {
+      submit(requestId, "AUTHORIZE");
+      runJobs();
+      // Both are due now and the outcome fails again: retry backoff alone would let the stale
+      // event overtake it.
+      makeWebhooksDue(requestId);
+      runJobs();
+
+      assertThat(webhooks(requestId))
+          .isNotEmpty()
+          .allSatisfy(event -> assertThat(event.path("status").asText()).isEqualTo("SUCCEEDED"));
+    } finally {
+      receiver.stopFailing("authorize.succeeded");
+    }
+
+    makeWebhooksDue(requestId);
+    runJobs();
+
+    List<JsonNode> events = webhooks(requestId);
+    assertThat(events.getLast().path("status").asText()).isEqualTo("PENDING");
+    assertThat(events.subList(0, events.size() - 1))
+        .allSatisfy(event -> assertThat(event.path("status").asText()).isEqualTo("SUCCEEDED"));
+  }
+
+  @Test
+  void outOfOrderSendsNoStaleEventForAnOperationThatFailedWhenSubmitted() throws Exception {
+    faults.inject(merchant, "CAPTURE", "OUT_OF_ORDER");
+    String authorisation = submit(newRequestId(), "AUTHORIZE").path("psp_reference").asText();
+    String capture = newRequestId();
+
+    // The authorisation has not settled yet, so the capture is declined at once at version 1:
+    // there is no older version to send.
+    JsonNode declined =
+        json.readTree(
+            submit(body(capture, "CAPTURE", authorisation, 10_000), Duration.ofSeconds(10)).body());
+    runJobs();
+    makeWebhooksDue(capture);
+    runJobs();
+
+    assertThat(declined.path("failure_reason").asText()).isEqualTo("PARENT_NOT_SUCCEEDED");
+    assertThat(webhooks(capture))
+        .singleElement()
+        .satisfies(event -> assertThat(event.path("status").asText()).isEqualTo("FAILED"));
+  }
+
+  @Test
   void delayWebhookSendsTheOutcomeLate() throws Exception {
     faults.inject(merchant, "AUTHORIZE", "DELAY_WEBHOOK");
     String requestId = newRequestId();

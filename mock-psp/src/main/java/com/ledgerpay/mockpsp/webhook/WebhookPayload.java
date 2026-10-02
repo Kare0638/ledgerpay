@@ -21,6 +21,10 @@ record WebhookPayload(
    * delivering out of order sends after the outcome ({@code OUT_OF_ORDER}).
    */
   static WebhookPayload stale(String eventId, Operation operation) {
+    if (operation.resourceVersion() <= 1) {
+      throw new IllegalArgumentException(
+          operation.pspRequestId() + " was never PENDING under an older version");
+    }
     return new WebhookPayload(
         eventId,
         operation.type().name().toLowerCase() + ".pending",
@@ -31,7 +35,7 @@ record WebhookPayload(
         operation.currency(),
         "PENDING",
         operation.createdAt(),
-        Math.max(1, operation.resourceVersion() - 1));
+        operation.resourceVersion() - 1);
   }
 
   static WebhookPayload of(String eventId, Operation operation) {

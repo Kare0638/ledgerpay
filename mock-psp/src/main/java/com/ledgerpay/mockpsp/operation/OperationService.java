@@ -75,7 +75,10 @@ public class OperationService {
       failure = decline(request, parent);
     }
 
-    Fault fault = faults.take(request.merchantId(), request.type()).orElse(null);
+    // Taken before the insert because DECLINE decides the status; given back if no operation is
+    // created after all, so a rule's times count only operations that really got the fault.
+    Optional<FaultRules.Taken> taken = faults.take(request.merchantId(), request.type());
+    Fault fault = taken.map(FaultRules.Taken::fault).orElse(null);
     if (fault == Fault.DECLINE && failure == null) {
       // A real reason to decline wins; otherwise the fault stands in for the issuer's refusal.
       failure = FailureReason.DECLINED;
@@ -85,6 +88,7 @@ public class OperationService {
             "psp_" + UUID.randomUUID(), request, failure, fault, properties.settleDelay());
     if (inserted.isEmpty()) {
       // A concurrent request with the same ID committed first.
+      taken.ifPresent(FaultRules.Taken::giveBack);
       return repeat(operations.findByRequestId(request.pspRequestId()).orElseThrow(), request);
     }
     Operation operation = inserted.get();

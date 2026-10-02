@@ -51,15 +51,26 @@ public class WebhookEvents {
     if (fault == Fault.DUPLICATE_WEBHOOK) {
       // The same event ten times, and the same outcome under two more event IDs: both of the
       // receiver's de-duplication layers get exercised (AT-07).
-      insert(WebhookPayload.of(newEventId(), operation), operation, 10, delay);
-      insert(WebhookPayload.of(newEventId(), operation), operation, 1, delay);
-      insert(WebhookPayload.of(newEventId(), operation), operation, 1, delay);
+      insert(WebhookPayload.of(newEventId(), operation), operation, 10, delay, null);
+      insert(WebhookPayload.of(newEventId(), operation), operation, 1, delay, null);
+      insert(WebhookPayload.of(newEventId(), operation), operation, 1, delay, null);
       return;
     }
-    insert(WebhookPayload.of(newEventId(), operation), operation, 1, delay);
+    WebhookPayload outcome = WebhookPayload.of(newEventId(), operation);
+    insert(outcome, operation, 1, delay, null);
     if (fault == Fault.OUT_OF_ORDER) {
-      // Due after the outcome, and claimed in due order, so it arrives second (AT-09).
-      insert(WebhookPayload.stale(newEventId(), operation), operation, 1, faults.staleEventDelay());
+      if (operation.resourceVersion() <= 1) {
+        // Failed when submitted: there is no earlier PENDING version to send.
+        log.info("OUT_OF_ORDER: {} was never PENDING; no stale event", operation.pspRequestId());
+        return;
+      }
+      // Held back until the outcome is delivered, however many attempts that takes (AT-09).
+      insert(
+          WebhookPayload.stale(newEventId(), operation),
+          operation,
+          1,
+          faults.staleEventDelay(),
+          outcome.eventId());
     }
   }
 
@@ -67,7 +78,12 @@ public class WebhookEvents {
     return "evt_" + UUID.randomUUID();
   }
 
-  private void insert(WebhookPayload payload, Operation operation, int copies, Duration delay) {
+  private void insert(
+      WebhookPayload payload,
+      Operation operation,
+      int copies,
+      Duration delay,
+      String afterEventId) {
     String body;
     try {
       body = json.writeValueAsString(payload);
@@ -76,13 +92,16 @@ public class WebhookEvents {
     }
     jdbc.sql(
             """
-            INSERT INTO webhook_events (event_id, psp_reference, payload, copies, next_attempt_at)
-            VALUES (:id, :reference, :payload, :copies, now() + :delayMillis * interval '1 millisecond')""")
+            INSERT INTO webhook_events
+                (event_id, psp_reference, payload, copies, next_attempt_at, after_event_id)
+            VALUES (:id, :reference, :payload, :copies,
+                    now() + :delayMillis * interval '1 millisecond', :after)""")
         .param("id", payload.eventId())
         .param("reference", operation.pspReference())
         .param("payload", body)
         .param("copies", copies)
         .param("delayMillis", delay.toMillis())
+        .param("after", afterEventId)
         .update();
   }
 
@@ -97,12 +116,16 @@ public class WebhookEvents {
                SET attempts = attempts + 1,
                    next_attempt_at = now() + :leaseMillis * interval '1 millisecond'
              WHERE event_id IN (
-                   SELECT event_id FROM webhook_events
-                    WHERE delivered_at IS NULL AND next_attempt_at <= now()
-                      AND attempts < :maxAttempts
-                    ORDER BY next_attempt_at
+                   SELECT e.event_id FROM webhook_events e
+                    WHERE e.delivered_at IS NULL AND e.next_attempt_at <= now()
+                      AND e.attempts < :maxAttempts
+                      AND NOT EXISTS (
+                          SELECT 1 FROM webhook_events w
+                           WHERE w.event_id = e.after_event_id
+                             AND w.delivered_at IS NULL)
+                    ORDER BY e.next_attempt_at
                     LIMIT :limit
-                      FOR UPDATE SKIP LOCKED)
+                      FOR UPDATE OF e SKIP LOCKED)
             RETURNING event_id, payload, attempts, copies""")
         .param("leaseMillis", lease.toMillis())
         .param("maxAttempts", maxAttempts)
