@@ -7,6 +7,7 @@ COPY common/pom.xml common/
 COPY payment-service/pom.xml payment-service/
 COPY notification-service/pom.xml notification-service/
 COPY mock-psp/pom.xml mock-psp/
+COPY acceptance-tests/pom.xml acceptance-tests/
 COPY benchmarks/pom.xml benchmarks/
 RUN --mount=type=cache,target=/root/.m2 mvn -B -q -pl ${MODULE} -am dependency:go-offline
 COPY . .

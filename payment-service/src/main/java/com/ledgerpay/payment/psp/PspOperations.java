@@ -64,7 +64,7 @@ public class PspOperations {
                        updated_at = now()
                  WHERE id IN (
                        SELECT id FROM psp_operations
-                        WHERE status = 'PENDING' AND next_attempt_at <= now()
+                        WHERE status = 'PENDING' AND NOT needs_review AND next_attempt_at <= now()
                           AND (lease_until IS NULL OR lease_until < now())
                         ORDER BY next_attempt_at
                         LIMIT :limit
@@ -116,12 +116,22 @@ public class PspOperations {
   }
 
   /**
-   * The call established nothing. The lease is kept, so the operation is tried again once it
-   * expires; exponential backoff and needs_review arrive with #10.
+   * The call established nothing: keep the error, release the lease and try again after {@code
+   * retryIn}, or set the operation aside for review. Either way its business state is left alone: a
+   * reservation stays reserved and the payment stays pending, because the outcome is unknown.
    */
-  public void recordError(UUID id, String error) {
-    jdbc.sql("UPDATE psp_operations SET last_error = ?, updated_at = now() WHERE id = ?")
-        .params(error.length() <= 1000 ? error : error.substring(0, 1000), id)
+  public void recordFailure(UUID id, String error, Duration retryIn, boolean needsReview) {
+    jdbc.sql(
+            """
+            UPDATE psp_operations
+               SET last_error = :error, lease_until = NULL, needs_review = :review,
+                   next_attempt_at = now() + :retryMillis * interval '1 millisecond',
+                   updated_at = now()
+             WHERE id = :id AND status = 'PENDING'""")
+        .param("error", error.length() <= 1000 ? error : error.substring(0, 1000))
+        .param("review", needsReview)
+        .param("retryMillis", retryIn.toMillis())
+        .param("id", id)
         .update();
   }
 

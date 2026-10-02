@@ -498,6 +498,8 @@ The PSP is then called **outside** any transaction:
 | Timeout, 5xx, connection error | Stay PENDING, record `last_error`, back off 1, 2, 4, 8 … s up to 60 s with jitter |
 | 10 automatic attempts | Set `needs_review`, alert; **business state unchanged**, reservation not released |
 
+Backoff is 1, 2, 4, 8 … s capped at 60 s with equal jitter (half fixed, half random). A failed call releases the lease and sets `next_attempt_at`; operations with `needs_review` are never claimed. See [ADR 0004](adr/0004-unknown-outcomes-inquire-before-retry.md).
+
 If a worker dies mid-flight, the lease expires and another worker picks the operation up. The fixed request ID and the journal unique key make the repeat harmless.
 
 ### 9.2 Inbound webhooks (inbox)
@@ -657,7 +659,7 @@ A separate **ledger integrity check** runs regardless of the report: exactly one
 
 ### Acceptance tests
 
-Each test sets up its own data and is repeatable. Tests assert **both** the local database and mock-psp state; an HTTP success is never taken as proof of the money effect.
+The cross-service acceptance tests live in the `acceptance-tests` module. It runs payment-service in the test JVM and mock-psp from its runnable jar as a separate process, under the `dev` profile so that faults can be injected; both use one PostgreSQL container with a database each. The two services cannot share a classpath, because their `application.yml` and `db/migration` would collide. The module needs mock-psp's jar, so it runs in `./mvnw verify`, not in `test` alone. Each test sets up its own data and is repeatable. Tests assert **both** the local database and mock-psp state; an HTTP success is never taken as proof of the money effect.
 
 | ID | Input or fault | Expected |
 |---|---|---|
@@ -814,6 +816,7 @@ ledgerpay/
 │       └── idempotency/
 ├── notification-service/
 ├── mock-psp/                 # simulated PSP, fault injection, settlement export
+├── acceptance-tests/         # AT-xx across services: payment-service in-process, mock-psp as a process
 ├── load-tests/               # k6 scripts
 ├── benchmarks/               # JMH benchmarks
 ├── demo/                     # demo data, report variants, expected results
@@ -831,7 +834,7 @@ ledgerpay/
 | 0001 | Money as integer minor units; HALF_UP fee rounding |
 | 0002 | Idempotency via database unique constraints, three layers |
 | 0003 | No ledger postings on authorisation or void |
-| 0004 | Unknown outcomes: inquire before any retry, fixed request IDs |
+| 0004 | Unknown outcomes: inquire before any retry, fixed request IDs ([accepted](adr/0004-unknown-outcomes-inquire-before-retry.md)) |
 | 0005 | Refund reservation with pessimistic locking |
 | 0006 | Transactional outbox; at-least-once delivery with idempotent consumers |
 | 0007 | Reconciliation never mutates the ledger; UTC business days |

@@ -123,7 +123,9 @@ public class PspDispatchBenchmark {
             Duration.ofSeconds(1),
             Duration.ofMinutes(15),
             "mock-psp",
-            "unused");
+            "unused",
+            10,
+            Duration.ofSeconds(60));
     calls = executor(executor);
     worker =
         new PspOperationWorker(
