@@ -448,6 +448,21 @@ class OperationContractTest {
     assertThat(rest.field("status")).isEqualTo("PENDING");
   }
 
+  @Test
+  void faultInjectionDoesNotExistOutsideTheDevProfile() {
+    HttpHeaders headers = new HttpHeaders();
+    headers.setContentType(MediaType.APPLICATION_JSON);
+    var add =
+        rest.postForEntity(
+            "/_admin/faults",
+            new HttpEntity<>("{\"merchant_id\": \"m\", \"fault\": \"DECLINE\"}", headers),
+            String.class);
+    var list = rest.getForEntity("/_admin/faults", String.class);
+
+    assertThat(add.getStatusCode().value()).isEqualTo(404);
+    assertThat(list.getStatusCode().value()).isEqualTo(404);
+  }
+
   // --- inquiry -----------------------------------------------------------------------------
 
   @Test

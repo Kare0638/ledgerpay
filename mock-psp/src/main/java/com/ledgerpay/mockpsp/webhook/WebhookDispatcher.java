@@ -55,16 +55,10 @@ public class WebhookDispatcher {
 
   private boolean deliver(WebhookEvents.Due due) {
     byte[] body = due.payload().getBytes(StandardCharsets.UTF_8);
-    long timestamp = clock.instant().getEpochSecond();
     try {
-      http.post()
-          .uri(properties.webhook().url())
-          .contentType(MediaType.APPLICATION_JSON)
-          .header(WebhookSignature.TIMESTAMP_HEADER, String.valueOf(timestamp))
-          .header(WebhookSignature.SIGNATURE_HEADER, WebhookSignature.sign(secret, timestamp, body))
-          .body(body)
-          .retrieve()
-          .toBodilessEntity();
+      for (int copy = 0; copy < due.copies(); copy++) {
+        send(body);
+      }
     } catch (RestClientException e) {
       log.warn("Webhook {} attempt {} failed: {}", due.eventId(), due.attempts(), e.getMessage());
       events.markFailed(due.eventId(), due.attempts(), e.getMessage());
@@ -72,5 +66,18 @@ public class WebhookDispatcher {
     }
     events.markDelivered(due.eventId());
     return true;
+  }
+
+  /** One signed POST; each copy of a duplicated event is signed afresh, like a redelivery. */
+  private void send(byte[] body) {
+    long timestamp = clock.instant().getEpochSecond();
+    http.post()
+        .uri(properties.webhook().url())
+        .contentType(MediaType.APPLICATION_JSON)
+        .header(WebhookSignature.TIMESTAMP_HEADER, String.valueOf(timestamp))
+        .header(WebhookSignature.SIGNATURE_HEADER, WebhookSignature.sign(secret, timestamp, body))
+        .body(body)
+        .retrieve()
+        .toBodilessEntity();
   }
 }

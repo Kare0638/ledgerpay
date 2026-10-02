@@ -1,5 +1,6 @@
 package com.ledgerpay.mockpsp.operation;
 
+import com.ledgerpay.mockpsp.fault.Fault;
 import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.time.Duration;
@@ -16,7 +17,7 @@ public class Operations {
   private static final String COLUMNS =
       """
       psp_reference, psp_request_id, merchant_id, type, parent_reference, amount_minor, currency,
-      status, failure_reason, resource_version, created_at, succeeded_at, updated_at""";
+      status, failure_reason, resource_version, created_at, succeeded_at, updated_at, fault""";
 
   private final JdbcClient jdbc;
 
@@ -60,14 +61,18 @@ public class Operations {
    * Returns empty if another request with the same {@code psp_request_id} got there first.
    */
   Optional<Operation> insert(
-      String pspReference, SubmitRequest request, FailureReason failure, Duration settleAfter) {
+      String pspReference,
+      SubmitRequest request,
+      FailureReason failure,
+      Fault fault,
+      Duration settleAfter) {
     return jdbc.sql(
             """
             INSERT INTO operations
                 (psp_reference, psp_request_id, merchant_id, type, parent_reference,
-                 amount_minor, currency, status, failure_reason, settle_at)
+                 amount_minor, currency, status, failure_reason, fault, settle_at)
             VALUES (:reference, :request, :merchant, :type, :parent,
-                    :amount, :currency, :status, :failure,
+                    :amount, :currency, :status, :failure, :fault,
                     now() + :settleMillis * interval '1 millisecond')
             ON CONFLICT (psp_request_id) DO NOTHING
             RETURNING\s"""
@@ -82,6 +87,7 @@ public class Operations {
         .param(
             "status", (failure == null ? OperationStatus.PENDING : OperationStatus.FAILED).name())
         .param("failure", failure == null ? null : failure.name())
+        .param("fault", fault == null ? null : fault.name())
         .param("settleMillis", settleAfter.toMillis())
         .query(Operations::map)
         .optional();
@@ -125,7 +131,8 @@ public class Operations {
         rs.getInt("resource_version"),
         instant(rs, "created_at"),
         instant(rs, "succeeded_at"),
-        instant(rs, "updated_at"));
+        instant(rs, "updated_at"),
+        rs.getString("fault") == null ? null : Fault.valueOf(rs.getString("fault")));
   }
 
   private static Instant instant(ResultSet rs, String column) throws SQLException {
