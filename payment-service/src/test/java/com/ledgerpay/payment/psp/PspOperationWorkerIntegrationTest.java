@@ -44,7 +44,13 @@ import org.springframework.transaction.support.TransactionTemplate;
 /** {@link PspOperationWorker} against a scripted PSP and real PostgreSQL. */
 @SpringBootTest(
     webEnvironment = SpringBootTest.WebEnvironment.NONE,
-    properties = {"ledgerpay.psp.read-timeout=500ms", "ledgerpay.psp.batch-size=5"})
+    properties = {
+      "ledgerpay.psp.read-timeout=500ms",
+      "ledgerpay.psp.batch-size=5",
+      // Far longer than any test: a clock step (WSL jumps about 65 s) must not expire a lease
+      // mid-test and let a second worker legitimately reclaim it. Expiry is tested explicitly.
+      "ledgerpay.psp.lease=10m"
+    })
 @Import(PostgresTestcontainersConfiguration.class)
 class PspOperationWorkerIntegrationTest {
 
