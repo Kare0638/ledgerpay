@@ -23,6 +23,7 @@
         <module>payment-service</module>
         <module>notification-service</module>
         <module>mock-psp</module>
+        <module>acceptance-tests</module>
         <module>benchmarks</module>
     </modules>
 

@@ -1,9 +1,11 @@
 package com.ledgerpay.payment.psp;
 
+import java.time.Duration;
 import java.util.List;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Future;
+import java.util.concurrent.ThreadLocalRandom;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Qualifier;
@@ -85,12 +87,26 @@ public class PspOperationWorker {
             operation.id(), outcome.pspReference(), properties.safetyNetDelay());
       }
       case PspResult.Unknown unknown -> {
-        log.warn(
-            "PSP call for {} attempt {}: {}",
-            operation.pspRequestId(),
-            operation.attempts(),
-            unknown.error());
-        operations.recordError(operation.id(), unknown.error());
+        boolean exhausted = operation.attempts() >= properties.maxAttempts();
+        Duration retryIn =
+            RetryBackoff.delay(
+                operation.attempts(), properties.maxBackoff(), ThreadLocalRandom.current());
+        operations.recordFailure(operation.id(), unknown.error(), retryIn, exhausted);
+        if (exhausted) {
+          // Alert: a human decides. Nothing is released or rolled back, as the outcome is unknown.
+          log.error(
+              "PSP operation {} needs review after {} attempts: {}",
+              operation.pspRequestId(),
+              operation.attempts(),
+              unknown.error());
+        } else {
+          log.warn(
+              "PSP call for {} attempt {} failed, retrying in {} ms: {}",
+              operation.pspRequestId(),
+              operation.attempts(),
+              retryIn.toMillis(),
+              unknown.error());
+        }
       }
       case PspResult.NotFound notFound ->
           throw new IllegalStateException("call() never returns NotFound");

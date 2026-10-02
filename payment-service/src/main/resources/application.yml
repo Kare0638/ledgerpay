@@ -34,6 +34,8 @@ ledgerpay:
     safety-net-delay: 15m
     provider: mock-psp
     webhook-secret: ${PSP_WEBHOOK_SECRET:dev-only-webhook-secret}
+    max-attempts: 10
+    max-backoff: 60s
   inbox:
     poll-interval: 200ms
 
