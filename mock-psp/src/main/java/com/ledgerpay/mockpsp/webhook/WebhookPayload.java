@@ -16,6 +16,24 @@ record WebhookPayload(
     Instant occurredAt,
     int resourceVersion) {
 
+  /**
+   * The event that reported the operation as accepted, one version before its outcome: what a PSP
+   * delivering out of order sends after the outcome ({@code OUT_OF_ORDER}).
+   */
+  static WebhookPayload stale(String eventId, Operation operation) {
+    return new WebhookPayload(
+        eventId,
+        operation.type().name().toLowerCase() + ".pending",
+        operation.pspRequestId(),
+        operation.pspReference(),
+        operation.merchantId(),
+        operation.amountMinor(),
+        operation.currency(),
+        "PENDING",
+        operation.createdAt(),
+        Math.max(1, operation.resourceVersion() - 1));
+  }
+
   static WebhookPayload of(String eventId, Operation operation) {
     return new WebhookPayload(
         eventId,

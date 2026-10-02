@@ -2,10 +2,14 @@ package com.ledgerpay.mockpsp.webhook;
 
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.ledgerpay.mockpsp.MockPspProperties;
+import com.ledgerpay.mockpsp.fault.Fault;
 import com.ledgerpay.mockpsp.operation.Operation;
 import java.time.Duration;
 import java.util.List;
 import java.util.UUID;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.jdbc.core.simple.JdbcClient;
 import org.springframework.stereotype.Repository;
 import org.springframework.transaction.annotation.Propagation;
@@ -15,34 +19,70 @@ import org.springframework.transaction.annotation.Transactional;
 @Repository
 public class WebhookEvents {
 
+  private static final Logger log = LoggerFactory.getLogger(WebhookEvents.class);
+
   static final int MAX_ERROR_LENGTH = 1000;
   static final Duration MAX_BACKOFF = Duration.ofSeconds(60);
 
-  record Due(String eventId, String payload, int attempts) {}
+  record Due(String eventId, String payload, int attempts, int copies) {}
 
   private final JdbcClient jdbc;
   private final ObjectMapper json;
+  private final MockPspProperties.Faults faults;
 
-  public WebhookEvents(JdbcClient jdbc, ObjectMapper json) {
+  public WebhookEvents(JdbcClient jdbc, ObjectMapper json, MockPspProperties properties) {
     this.jdbc = jdbc;
     this.json = json;
+    this.faults = properties.faults();
   }
 
-  /** Queues a webhook reporting the operation's current, final state. */
+  /**
+   * Queues the webhooks reporting the operation's current, final state: one event, unless a fault
+   * was injected for the operation (design §9.4).
+   */
   @Transactional(propagation = Propagation.MANDATORY)
   public void enqueue(Operation operation) {
-    String eventId = "evt_" + UUID.randomUUID();
-    String payload;
+    Fault fault = operation.fault();
+    if (fault == Fault.DROP_WEBHOOK) {
+      log.info("DROP_WEBHOOK: no webhook for {}", operation.pspRequestId());
+      return;
+    }
+    Duration delay = fault == Fault.DELAY_WEBHOOK ? faults.webhookDelay() : Duration.ZERO;
+    if (fault == Fault.DUPLICATE_WEBHOOK) {
+      // The same event ten times, and the same outcome under two more event IDs: both of the
+      // receiver's de-duplication layers get exercised (AT-07).
+      insert(WebhookPayload.of(newEventId(), operation), operation, 10, delay);
+      insert(WebhookPayload.of(newEventId(), operation), operation, 1, delay);
+      insert(WebhookPayload.of(newEventId(), operation), operation, 1, delay);
+      return;
+    }
+    insert(WebhookPayload.of(newEventId(), operation), operation, 1, delay);
+    if (fault == Fault.OUT_OF_ORDER) {
+      // Due after the outcome, and claimed in due order, so it arrives second (AT-09).
+      insert(WebhookPayload.stale(newEventId(), operation), operation, 1, faults.staleEventDelay());
+    }
+  }
+
+  private static String newEventId() {
+    return "evt_" + UUID.randomUUID();
+  }
+
+  private void insert(WebhookPayload payload, Operation operation, int copies, Duration delay) {
+    String body;
     try {
-      payload = json.writeValueAsString(WebhookPayload.of(eventId, operation));
+      body = json.writeValueAsString(payload);
     } catch (JsonProcessingException e) {
       throw new IllegalStateException(e);
     }
     jdbc.sql(
             """
-            INSERT INTO webhook_events (event_id, psp_reference, payload)
-            VALUES (?, ?, ?)""")
-        .params(eventId, operation.pspReference(), payload)
+            INSERT INTO webhook_events (event_id, psp_reference, payload, copies, next_attempt_at)
+            VALUES (:id, :reference, :payload, :copies, now() + :delayMillis * interval '1 millisecond')""")
+        .param("id", payload.eventId())
+        .param("reference", operation.pspReference())
+        .param("payload", body)
+        .param("copies", copies)
+        .param("delayMillis", delay.toMillis())
         .update();
   }
 
@@ -63,13 +103,17 @@ public class WebhookEvents {
                     ORDER BY next_attempt_at
                     LIMIT :limit
                       FOR UPDATE SKIP LOCKED)
-            RETURNING event_id, payload, attempts""")
+            RETURNING event_id, payload, attempts, copies""")
         .param("leaseMillis", lease.toMillis())
         .param("maxAttempts", maxAttempts)
         .param("limit", limit)
         .query(
             (rs, row) ->
-                new Due(rs.getString("event_id"), rs.getString("payload"), rs.getInt("attempts")))
+                new Due(
+                    rs.getString("event_id"),
+                    rs.getString("payload"),
+                    rs.getInt("attempts"),
+                    rs.getInt("copies")))
         .list();
   }
 

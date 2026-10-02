@@ -1,10 +1,13 @@
 package com.ledgerpay.mockpsp.api;
 
+import com.ledgerpay.mockpsp.MockPspProperties;
+import com.ledgerpay.mockpsp.fault.Fault;
 import com.ledgerpay.mockpsp.operation.Operation;
 import com.ledgerpay.mockpsp.operation.OperationService;
 import com.ledgerpay.mockpsp.operation.SubmitRequest;
 import jakarta.validation.Valid;
 import java.net.URI;
+import java.time.Duration;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ProblemDetail;
 import org.springframework.http.ResponseEntity;
@@ -25,9 +28,11 @@ import org.springframework.web.bind.annotation.RestController;
 class OperationController {
 
   private final OperationService operations;
+  private final MockPspProperties properties;
 
-  OperationController(OperationService operations) {
+  OperationController(OperationService operations, MockPspProperties properties) {
     this.operations = operations;
+    this.properties = properties;
   }
 
   @PostMapping
@@ -37,8 +42,20 @@ class OperationController {
     if (!submitted.created()) {
       return ResponseEntity.ok(operation);
     }
+    if (operation.fault() == Fault.TIMEOUT_AFTER_COMMIT) {
+      // The operation is committed and will succeed; only the answer is lost to the caller.
+      holdResponse(properties.faults().responseDelay());
+    }
     return ResponseEntity.created(URI.create("/v1/operations/" + operation.pspRequestId()))
         .body(operation);
+  }
+
+  private static void holdResponse(Duration delay) {
+    try {
+      Thread.sleep(delay);
+    } catch (InterruptedException e) {
+      Thread.currentThread().interrupt();
+    }
   }
 
   @GetMapping("/{pspRequestId}")

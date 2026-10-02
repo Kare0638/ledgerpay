@@ -5,6 +5,8 @@ import static com.ledgerpay.mockpsp.operation.SubmitRejectedException.Reason.INV
 import static com.ledgerpay.mockpsp.operation.SubmitRejectedException.Reason.REQUEST_ID_CONFLICT;
 
 import com.ledgerpay.mockpsp.MockPspProperties;
+import com.ledgerpay.mockpsp.fault.Fault;
+import com.ledgerpay.mockpsp.fault.FaultRules;
 import com.ledgerpay.mockpsp.webhook.WebhookEvents;
 import java.util.List;
 import java.util.Optional;
@@ -15,17 +17,23 @@ import org.springframework.transaction.annotation.Transactional;
 @Service
 public class OperationService {
 
+  /** {@code operation.fault()} is set only when {@code created}: a repeat is never faulted. */
   public record Submitted(Operation operation, boolean created) {}
 
   private final Operations operations;
   private final WebhookEvents webhooks;
   private final MockPspProperties properties;
+  private final FaultRules faults;
 
   public OperationService(
-      Operations operations, WebhookEvents webhooks, MockPspProperties properties) {
+      Operations operations,
+      WebhookEvents webhooks,
+      MockPspProperties properties,
+      FaultRules faults) {
     this.operations = operations;
     this.webhooks = webhooks;
     this.properties = properties;
+    this.faults = faults;
   }
 
   /**
@@ -67,8 +75,14 @@ public class OperationService {
       failure = decline(request, parent);
     }
 
+    Fault fault = faults.take(request.merchantId(), request.type()).orElse(null);
+    if (fault == Fault.DECLINE && failure == null) {
+      // A real reason to decline wins; otherwise the fault stands in for the issuer's refusal.
+      failure = FailureReason.DECLINED;
+    }
     Optional<Operation> inserted =
-        operations.insert("psp_" + UUID.randomUUID(), request, failure, properties.settleDelay());
+        operations.insert(
+            "psp_" + UUID.randomUUID(), request, failure, fault, properties.settleDelay());
     if (inserted.isEmpty()) {
       // A concurrent request with the same ID committed first.
       return repeat(operations.findByRequestId(request.pspRequestId()).orElseThrow(), request);

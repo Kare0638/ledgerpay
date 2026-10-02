@@ -30,6 +30,11 @@ mockpsp:
     read-timeout: 5s
     lease: 30s
     max-attempts: 20
+  # Used only by faults injected through /_admin/faults, which exists under the dev profile only.
+  faults:
+    response-delay: 10s
+    webhook-delay: 30s
+    stale-event-delay: 1s
 
 management:
   endpoints:

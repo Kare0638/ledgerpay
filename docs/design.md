@@ -567,6 +567,19 @@ Fault injection (dev profile only):
 | `OUT_OF_ORDER` | A stale event cannot move state backwards |
 | `DELAY_WEBHOOK` | Late delivery still converges |
 
+Faults are selected through `POST /_admin/faults` with `{merchant_id, type?, fault, times?}`, which applies the fault to the next `times` new operations of that merchant and type, or to every one. `GET` lists the rules, `DELETE` clears them, and `DELETE /{id}` removes one. The controller exists only under the `dev` profile (the local Compose stack); elsewhere these paths are 404. Rules are held in memory, and the fault is stored with each operation so that settling and delivery can act on it. Repeats are never faulted, and responses never reveal a fault.
+
+| Fault | What mock-psp does |
+|---|---|
+| `DECLINE` | Records the operation as FAILED with `DECLINED`, unless a real decline reason applies, and sends it by webhook |
+| `TIMEOUT_AFTER_COMMIT` | Commits the operation, which succeeds as usual, then holds the submit response for `mockpsp.faults.response-delay` (10 s), beyond the caller's read timeout |
+| `DROP_WEBHOOK` | Settles without queueing any webhook |
+| `DUPLICATE_WEBHOOK` | Sends the outcome 10 times under one event ID, and once each under two more event IDs |
+| `OUT_OF_ORDER` | After the outcome, sends the operation's PENDING event with the previous `resource_version`, due `stale-event-delay` (1 s) later |
+| `DELAY_WEBHOOK` | Sends the outcome after `webhook-delay` (30 s) |
+
+`MockPspFaults` (mock-psp tests) configures faults from any test over plain HTTP.
+
 ---
 
 ## 10. Transactional outbox and Kafka

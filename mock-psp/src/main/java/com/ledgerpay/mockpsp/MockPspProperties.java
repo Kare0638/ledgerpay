@@ -11,7 +11,15 @@ import org.springframework.boot.context.properties.ConfigurationProperties;
  */
 @ConfigurationProperties("mockpsp")
 public record MockPspProperties(
-    Duration settleDelay, Duration pollInterval, int batchSize, Webhook webhook) {
+    Duration settleDelay, Duration pollInterval, int batchSize, Webhook webhook, Faults faults) {
+
+  /**
+   * @param responseDelay how long {@code TIMEOUT_AFTER_COMMIT} holds the submit response; longer
+   *     than the caller's read timeout
+   * @param webhookDelay how late {@code DELAY_WEBHOOK} sends the outcome
+   * @param staleEventDelay how long after the outcome {@code OUT_OF_ORDER} sends the older event
+   */
+  public record Faults(Duration responseDelay, Duration webhookDelay, Duration staleEventDelay) {}
 
   /**
    * @param url where every webhook is sent (payment-service's {@code /webhooks/psp})
