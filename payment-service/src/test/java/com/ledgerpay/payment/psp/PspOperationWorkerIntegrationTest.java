@@ -45,9 +45,7 @@ import org.springframework.transaction.support.TransactionTemplate;
 @SpringBootTest(
     webEnvironment = SpringBootTest.WebEnvironment.NONE,
     properties = {
-      // Below the 2 s replies the timeout tests use, but with room for 20 concurrent calls on a
-      // slow CI runner: at 500 ms some were cancelled before reaching the stub.
-      "ledgerpay.psp.read-timeout=1500ms",
+      "ledgerpay.psp.read-timeout=500ms",
       "ledgerpay.psp.batch-size=5",
       // Far longer than any test: a clock step (WSL jumps about 65 s) must not expire a lease
       // mid-test and let a second worker legitimately reclaim it. Expiry is tested explicitly.
