@@ -104,8 +104,9 @@ class PspOperationWorkerIntegrationTest {
   Map<String, Object> row(UUID operationId) {
     return jdbc.sql(
             """
-            SELECT status, psp_reference, attempts, last_error,
+            SELECT status, psp_reference, attempts, failures, last_error, needs_review,
                    lease_until IS NOT NULL AND lease_until > now() AS leased,
+                   (extract(epoch FROM next_attempt_at - updated_at) * 1000)::bigint AS retry_in_ms,
                    next_attempt_at > now() + interval '14 minutes' AS safety_net_scheduled
               FROM psp_operations WHERE id = ?""")
         .param(operationId)
@@ -228,8 +229,9 @@ class PspOperationWorkerIntegrationTest {
     worker.runOnce();
 
     // Virtual threads are not counted here. Spring's fallback executor starts one per call: 6 for
-    // this batch of 5 when measured, against 0 with the fix.
-    assertThat(threads.getTotalStartedThreadCount() - before).isLessThanOrEqualTo(1);
+    // this batch of 5 when measured, against 0 to 2 with the fix (a carrier or pool thread may
+    // start meanwhile, depending on test order). Fewer than one per call is what matters.
+    assertThat(threads.getTotalStartedThreadCount() - before).isLessThan(5);
   }
 
   // --- outcomes ----------------------------------------------------------------------------
@@ -280,21 +282,70 @@ class PspOperationWorkerIntegrationTest {
   // --- unknown outcomes --------------------------------------------------------------------
 
   @Test
-  void aServerErrorIsRecordedAndTheLeaseHeldUntilItExpires() {
+  void aServerErrorReleasesTheLeaseAndRetriesAfterABackoff() {
     Created op = newAuthorisation(10_000);
     psp.respond(request -> Reply.of(503, "{\"code\": \"UNAVAILABLE\"}"));
 
     worker.runOnce();
-    int claimedAgain = worker.runOnce();
 
     var row = row(op.operationId());
     assertThat(row.get("status")).isEqualTo("PENDING");
     assertThat(row.get("psp_reference")).isNull();
     assertThat((String) row.get("last_error")).contains("503");
-    assertThat(row.get("leased")).isEqualTo(true);
-    assertThat(claimedAgain).isZero();
+    assertThat(row.get("leased")).isEqualTo(false);
+    assertThat(row.get("needs_review")).isEqualTo(false);
+    // First attempt: 1 s with equal jitter, so between 0.5 and 1 s.
+    assertThat((Long) row.get("retry_in_ms")).isBetween(500L, 1000L);
     assertThat(psp.requestsFor(op.pspRequestId())).hasSize(1);
     verify(outcomes, never()).apply(any(), any());
+  }
+
+  /** As if every earlier attempt had failed. */
+  void setFailedAttempts(Created op, int failures) {
+    jdbc.sql("UPDATE psp_operations SET attempts = ?, failures = ? WHERE id = ?")
+        .params(failures, failures, op.operationId())
+        .update();
+  }
+
+  @Test
+  void theBackoffDoublesWithEachAttemptUpToAMinute() {
+    psp.respond(request -> Reply.of(502, ""));
+    Created fourth = newAuthorisation(100);
+    setFailedAttempts(fourth, 3);
+    Created ninth = newAuthorisation(200);
+    setFailedAttempts(ninth, 8);
+
+    worker.runOnce();
+
+    // 2^(4-1) = 8 s, jittered to 4..8 s; 2^(9-1) = 256 s capped at 60 s, jittered to 30..60 s.
+    assertThat((Long) row(fourth.operationId()).get("retry_in_ms")).isBetween(4_000L, 8_000L);
+    assertThat((Long) row(ninth.operationId()).get("retry_in_ms")).isBetween(30_000L, 60_000L);
+  }
+
+  @Test
+  void afterTenAttemptsTheOperationNeedsReviewAndNothingElseChanges() {
+    Created op = newAuthorisation(10_000);
+    setFailedAttempts(op, 9);
+    psp.respond(request -> Reply.of(503, ""));
+
+    worker.runOnce();
+
+    var row = row(op.operationId());
+    assertThat(row.get("attempts")).isEqualTo(10);
+    assertThat(row.get("failures")).isEqualTo(10);
+    assertThat(row.get("needs_review")).isEqualTo(true);
+    assertThat(row.get("status")).isEqualTo("PENDING");
+    assertThat((String) row.get("last_error")).contains("503");
+    assertThat(
+            jdbc.sql("SELECT status FROM payments WHERE id = ?")
+                .param(op.paymentId())
+                .query(String.class)
+                .single())
+        .isEqualTo("AUTH_PENDING");
+    // Set aside: never claimed again automatically, even when due.
+    makeDue(op);
+    assertThat(worker.runOnce()).isZero();
+    assertThat(psp.requestsFor(op.pspRequestId())).hasSize(1);
   }
 
   @Test
@@ -330,7 +381,7 @@ class PspOperationWorkerIntegrationTest {
                     Duration.ofSeconds(2))
                 : Reply.of(200, StubPsp.operation(op.pspRequestId(), "psp_kept", "PENDING")));
     worker.runOnce();
-    expireLease(op);
+    makeDue(op);
 
     worker.runOnce();
 
@@ -339,7 +390,28 @@ class PspOperationWorkerIntegrationTest {
     var row = row(op.operationId());
     assertThat(row.get("psp_reference")).isEqualTo("psp_kept");
     assertThat(row.get("attempts")).isEqualTo(2);
+    // Reaching the PSP clears the failure the lost response counted.
+    assertThat(row.get("failures")).isEqualTo(0);
     assertThat(row.get("last_error")).isNull();
+  }
+
+  @Test
+  void safetyNetInquiriesOfAPendingOperationDoNotCountTowardsReview() {
+    Created op = newAuthorisation(10_000);
+    // Accepted hours ago and inquired every 15 minutes since: many attempts, no failures.
+    jdbc.sql("UPDATE psp_operations SET psp_reference = 'psp_slow', attempts = 20 WHERE id = ?")
+        .param(op.operationId())
+        .update();
+    psp.respond(request -> Reply.of(503, ""));
+
+    worker.runOnce();
+
+    var row = row(op.operationId());
+    assertThat(row.get("attempts")).isEqualTo(21);
+    assertThat(row.get("failures")).isEqualTo(1);
+    assertThat(row.get("needs_review")).isEqualTo(false);
+    // Backs off as a first failure, not a 21st.
+    assertThat((Long) row.get("retry_in_ms")).isBetween(500L, 1000L);
   }
 
   @Test
@@ -347,7 +419,7 @@ class PspOperationWorkerIntegrationTest {
     Created op = newAuthorisation(10_000);
     psp.respond(request -> Reply.of(502, ""));
     worker.runOnce();
-    expireLease(op);
+    makeDue(op);
     psp.respond(PspOperationWorkerIntegrationTest::accepting);
 
     worker.runOnce();
@@ -362,6 +434,16 @@ class PspOperationWorkerIntegrationTest {
 
   void expireLease(Created op) {
     jdbc.sql("UPDATE psp_operations SET lease_until = now() - interval '1 second' WHERE id = ?")
+        .param(op.operationId())
+        .update();
+  }
+
+  /** The retry is due now: no lease, and its backoff has elapsed. */
+  void makeDue(Created op) {
+    jdbc.sql(
+            """
+            UPDATE psp_operations SET lease_until = NULL, next_attempt_at = now() - interval '1 second'
+             WHERE id = ?""")
         .param(op.operationId())
         .update();
   }

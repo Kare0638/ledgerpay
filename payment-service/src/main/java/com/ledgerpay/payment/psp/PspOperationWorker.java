@@ -1,9 +1,11 @@
 package com.ledgerpay.payment.psp;
 
+import java.time.Duration;
 import java.util.List;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Future;
+import java.util.concurrent.ThreadLocalRandom;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Qualifier;
@@ -85,12 +87,28 @@ public class PspOperationWorker {
             operation.id(), outcome.pspReference(), properties.safetyNetDelay());
       }
       case PspResult.Unknown unknown -> {
-        log.warn(
-            "PSP call for {} attempt {}: {}",
-            operation.pspRequestId(),
-            operation.attempts(),
-            unknown.error());
-        operations.recordError(operation.id(), unknown.error());
+        // Only consecutive failures count: safety-net inquiries of an operation the PSP keeps
+        // pending raise attempts for hours without anything being wrong.
+        int failures = operation.failures() + 1;
+        boolean exhausted = failures >= properties.maxAttempts();
+        Duration retryIn =
+            RetryBackoff.delay(failures, properties.maxBackoff(), ThreadLocalRandom.current());
+        operations.recordFailure(operation.id(), unknown.error(), retryIn, exhausted);
+        if (exhausted) {
+          // Alert: a human decides. Nothing is released or rolled back, as the outcome is unknown.
+          log.error(
+              "PSP operation {} needs review after {} failed attempts: {}",
+              operation.pspRequestId(),
+              failures,
+              unknown.error());
+        } else {
+          log.warn(
+              "PSP call for {} failed {} times in a row, retrying in {} ms: {}",
+              operation.pspRequestId(),
+              failures,
+              retryIn.toMillis(),
+              unknown.error());
+        }
       }
       case PspResult.NotFound notFound ->
           throw new IllegalStateException("call() never returns NotFound");
