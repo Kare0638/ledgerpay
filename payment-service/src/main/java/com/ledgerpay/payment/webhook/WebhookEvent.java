@@ -18,7 +18,11 @@ public record WebhookEvent(
     @NotBlank String merchantId,
     @NotNull @Min(1) Long amountMinor,
     @NotNull @Pattern(regexp = "[A-Z]{3}") String currency,
-    @NotNull @Pattern(regexp = "SUCCEEDED|FAILED", message = "must be a final status")
+    // PENDING too: an event overtaken in delivery is acknowledged and recorded, never applied.
+    @NotNull
+        @Pattern(
+            regexp = "SUCCEEDED|FAILED|PENDING",
+            message = "must be SUCCEEDED, FAILED or PENDING")
         String status,
     @NotNull Instant occurredAt,
     @NotNull @Min(0) Integer resourceVersion) {

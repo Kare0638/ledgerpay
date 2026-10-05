@@ -14,7 +14,7 @@ public class Inbox {
     NEW,
     /** The same event again, byte for byte: a redelivery. */
     DUPLICATE,
-    /** The same event ID with a different body; the original is kept. */
+    /** The same event ID with a different body; the original is kept and the body recorded. */
     CONFLICT
   }
 
@@ -26,7 +26,10 @@ public class Inbox {
     this.jdbc = jdbc;
   }
 
-  /** Stores the event as RECEIVED unless it is already there. Never overwrites the original. */
+  /**
+   * Stores the event as RECEIVED unless it is already there. Never overwrites the original; a
+   * different body under the same event ID is recorded in {@code inbox_conflicts} instead.
+   */
   @Transactional
   public Received receive(String provider, String eventId, String payload, String payloadHash) {
     int inserted =
@@ -48,7 +51,20 @@ public class Inbox {
             .params(provider, eventId)
             .query(String.class)
             .single();
-    return stored.equals(payloadHash) ? Received.DUPLICATE : Received.CONFLICT;
+    if (stored.equals(payloadHash)) {
+      return Received.DUPLICATE;
+    }
+    jdbc.sql(
+            """
+            INSERT INTO inbox_conflicts (provider, event_id, payload_hash, payload)
+            VALUES (:provider, :event, :hash, :payload)
+            ON CONFLICT DO NOTHING""")
+        .param("provider", provider)
+        .param("event", eventId)
+        .param("hash", payloadHash)
+        .param("payload", payload)
+        .update();
+    return Received.CONFLICT;
   }
 
   /** Locks the oldest RECEIVED event, skipping any another processor holds. */

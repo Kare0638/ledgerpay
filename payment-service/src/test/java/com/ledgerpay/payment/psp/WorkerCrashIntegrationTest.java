@@ -161,7 +161,7 @@ class WorkerCrashIntegrationTest {
                 merchant,
                 PspOperationType.CAPTURE,
                 Money.of(10_000, Money.GBP),
-                true,
+                MoneyTransaction.ReportedStatus.SUCCEEDED,
                 null,
                 Instant.parse("2026-10-01T09:00:00Z"),
                 2));

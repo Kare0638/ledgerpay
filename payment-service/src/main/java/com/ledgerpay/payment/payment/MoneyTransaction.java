@@ -34,17 +34,29 @@ public class MoneyTransaction implements PspOutcomeHandler {
 
   private static final Logger log = LoggerFactory.getLogger(MoneyTransaction.class);
 
-  /** A final answer as reported, with the fields that must agree with what we asked for. */
+  /** What the PSP reported. Only a webhook can report PENDING; an inquiry applies final answers. */
+  public enum ReportedStatus {
+    PENDING,
+    SUCCEEDED,
+    FAILED
+  }
+
+  /** An answer as reported, with the fields that must agree with what we asked for. */
   public record Outcome(
       String pspRequestId,
       String pspReference,
       String merchantId,
       PspOperationType type,
       Money amount,
-      boolean succeeded,
+      ReportedStatus status,
       String failureReason,
       Instant succeededAt,
-      int resourceVersion) {}
+      int resourceVersion) {
+
+    boolean succeeded() {
+      return status == ReportedStatus.SUCCEEDED;
+    }
+  }
 
   public sealed interface Result {
     record Applied() implements Result {}
@@ -53,7 +65,10 @@ public class MoneyTransaction implements PspOutcomeHandler {
     record AlreadyApplied() implements Result {}
 
     /** Older than what we hold; it cannot move state backwards. */
-    record Stale() implements Result {}
+    record Stale(String reason) implements Result {}
+
+    /** A PENDING report for an operation that is still pending: nothing to apply. */
+    record NotFinal() implements Result {}
 
     /** Does not match our records or contradicts a final state; never touches money. */
     record Quarantined(String reason) implements Result {}
@@ -91,16 +106,23 @@ public class MoneyTransaction implements PspOutcomeHandler {
     if (mismatch != null) {
       return new Result.Quarantined(mismatch);
     }
+    if (outcome.status() == ReportedStatus.PENDING) {
+      // Never applied: PENDING is where every operation starts. After an outcome it is an event
+      // overtaken in delivery (design §9.3: a final state never regresses), not a contradiction.
+      return operation.isFinal()
+          ? new Result.Stale("Stale: PENDING after " + operation.status())
+          : new Result.NotFinal();
+    }
     if (operation.isFinal()) {
-      boolean same = operation.status().equals(outcome.succeeded() ? "SUCCEEDED" : "FAILED");
-      // A final state never changes, whatever arrives later.
-      return same
+      // A final state never changes, whatever arrives later. Two different final answers cannot
+      // both be true at any resource_version, so the contradiction goes to a human.
+      return operation.status().equals(outcome.status().name())
           ? new Result.AlreadyApplied()
           : new Result.Quarantined(
               "Operation is " + operation.status() + " but the PSP now reports otherwise");
     }
     if (outcome.resourceVersion() < operation.resourceVersion()) {
-      return new Result.Stale();
+      return new Result.Stale("Stale: older resource_version");
     }
 
     operations.complete(
@@ -152,7 +174,7 @@ public class MoneyTransaction implements PspOutcomeHandler {
                 claimed.merchantId(),
                 claimed.type(),
                 Money.of(claimed.amountMinor(), Currency.getInstance(claimed.currency())),
-                outcome.succeeded(),
+                outcome.succeeded() ? ReportedStatus.SUCCEEDED : ReportedStatus.FAILED,
                 outcome.failureReason(),
                 outcome.succeededAt(),
                 outcome.resourceVersion()));
