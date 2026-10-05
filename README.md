@@ -2,45 +2,61 @@
 
 A payment, double-entry ledger and settlement reconciliation service in Java 21 and Spring Boot, built around the failure modes that matter in payments: client retries, PSP timeouts with unknown outcomes, lost or duplicated webhooks, concurrent refunds, and books that disagree with the PSP's settlement report.
 
-> **Status:** Implementation is in progress; track it on the [milestones](https://github.com/Kare0638/ledgerpay/milestones) and [issues](https://github.com/Kare0638/ledgerpay/issues).
+> **Status (October 2026):** the core payment flow, the ledger and failure handling around the PSP are built and tested; refunds, the Kafka pipeline and reconciliation are next. Progress is tracked on the [milestones](https://github.com/Kare0638/ledgerpay/milestones).
 
-## What it demonstrates
+## Built and tested
 
-- **Idempotent payments API** — `Idempotency-Key` plus database unique constraints at three layers: request, merchant reference and journal.
-- **Authorise / capture / void / partial refund** lifecycle against a simulated PSP, with every money operation confirmed asynchronously.
-- **Unknown outcomes handled safely** — a timeout is never treated as a failure; the service inquires by a fixed request ID before any retry, so money never moves twice.
-- **Double-entry ledger with database-enforced invariants** — a deferred balance constraint, append-only journals and exactly one journal per settled operation.
-- **Refund reservation** — refundable balance is reserved transactionally, so concurrent refunds can never exceed the captured amount.
-- **Signed webhooks through a persisted inbox**, with de-duplication and quarantine of out-of-order or conflicting events.
-- **Transactional outbox + Kafka** — at-least-once delivery with idempotent consumers and a dead-letter topic; ledger correctness does not depend on the broker.
-- **Settlement reconciliation** — PSP CSV reports matched item by item on a consistent snapshot, with classified breaks; reconciliation never mutates the ledger.
-- **Performance analysis** — JMH benchmark of PSP calls on virtual threads vs a platform thread pool, and a JFR recording under load analysed for GC pauses and lock contention.
-- **Observability and evidence** — Micrometer, Prometheus, Grafana, alert rules, k6 load tests, fault-injection acceptance tests on real PostgreSQL and Kafka via Testcontainers.
+- **Idempotent payments API**: `Idempotency-Key` plus database unique constraints at three layers: request, merchant reference and journal ([ADR 0002](docs/adr/0002-idempotency-via-database-unique-constraints.md)). Fifty concurrent creates with one key make one payment (AT-02).
+- **Authorise, capture and void** against a simulated PSP. Every money operation is persisted first, called outside any transaction by a worker using `SKIP LOCKED` and leases, and confirmed asynchronously.
+- **Unknown outcomes handled safely**: a timeout is never treated as a failure. Every retry inquires by a fixed request ID before it may resubmit, with exponential backoff. After 10 consecutive failures the operation is set aside for review, and the payment stays pending ([ADR 0004](docs/adr/0004-unknown-outcomes-inquire-before-retry.md)). A capture whose response is lost is found by inquiry and booked once (AT-06); a worker killed before or after the money commit never books twice (AT-13).
+- **Double-entry ledger with database-enforced invariants**: a deferred balance constraint, append-only journals and exactly one journal per settled operation ([ADR 0001](docs/adr/0001-money-as-integer-minor-units.md), [ADR 0003](docs/adr/0003-no-postings-on-authorisation-or-void.md)). Property-based tests with jqwik cover fees and posting rules.
+- **Signed webhooks through a persisted inbox**: HMAC with a timestamp window. Events are de-duplicated by event ID and by outcome. Stale events are ignored. Unknown, mismatched or contradicting events are quarantined with the reason, and conflicting bodies are kept for investigation (AT-07, AT-08, AT-09).
+- **A mock PSP with fault injection**: decline, timeout after commit, dropped, duplicated, out-of-order and delayed webhooks, used by acceptance tests that run payment-service against the real mock-psp process and PostgreSQL.
+- **Performance analysis**: a JMH benchmark of PSP calls on virtual threads against platform thread pools, and JFR recordings under k6 load ([below](#performance)).
+
+Acceptance tests from the [design's list](docs/design.md): AT-01 to AT-09 and AT-13 pass, 10 of 19.
+
+## Planned
+
+| Milestone | What | Issues |
+|---|---|---|
+| M2: failure handling and events | Partial refunds with a transactional reservation, so concurrent refunds never exceed the capture | #12 |
+| | Merchant isolation: no cross-merchant reads (API-key authentication is in place) | #13 |
+| | Transactional outbox relay to Kafka. Outbox rows are already written in the money transaction; nothing publishes them yet | #14 |
+| | notification-service: idempotent consumer, signed merchant webhooks, dead-letter topic | #15 |
+| | CI quality gate and a README you can run end to end | #16 |
+| M3: reconciliation and observability | Settlement CSV import, matching on a consistent snapshot with classified breaks, ledger integrity check, demo data | #17–#21 |
+| | Metrics, Grafana dashboard, alert rules, structured logs | #22 |
+| M4: performance and cloud | Published k6 results, Terraform for ECS Fargate and RDS | #23, #24 |
+| Optional | An LLM assistant that drafts analyses of reconciliation breaks; SQS/SNS adapter | #26, #25 |
 
 ## Architecture
 
 ```
 Merchant ──▶ payment-service ──▶ PostgreSQL (source of truth for money)
                  │    ▲
-      PSP calls  │    │  signed webhooks, settlement CSV
+      PSP calls  │    │  signed webhooks (settlement CSV: planned)
                  ▼    │
                mock-psp (own state, fault injection)
 
-payment-service ──outbox──▶ Kafka ──▶ notification-service ──▶ signed merchant webhooks
+planned: payment-service ──outbox──▶ Kafka ──▶ notification-service ──▶ signed merchant webhooks
 ```
 
 See [docs/design.md](docs/design.md) for the full design: state machine, posting rules, schema, API, recovery paths, reconciliation rules and the acceptance test list.
 
 ## Tech stack
 
-Java 21 · Spring Boot 3 · PostgreSQL 16 · Flyway · Apache Kafka · Testcontainers · jqwik · Micrometer / Prometheus / Grafana · k6 · Docker Compose · Terraform · AWS (ECS Fargate, RDS)
+Java 21 · Spring Boot 3 · PostgreSQL 16 · Flyway · Testcontainers · jqwik · JMH · JFR · k6 · Docker Compose
+
+Planned: Apache Kafka · Micrometer / Prometheus / Grafana · Terraform · AWS (ECS Fargate, RDS)
 
 ## Running locally
 
 Requires JDK 21 and Docker.
 
 ```bash
-./mvnw verify                                  # unit + Testcontainers integration tests + format check
+./mvnw test                                    # unit + Testcontainers integration tests
+./mvnw verify                                  # + acceptance tests against the real mock-psp, + format check
 ./mvnw spotless:apply                          # fix formatting
 docker compose -f infra/docker-compose.yml up --build -d
 ```
@@ -49,9 +65,9 @@ docker compose -f infra/docker-compose.yml up --build -d
 |---|---|---|
 | payment-service | 8080 | http://localhost:8080/actuator/health |
 | mock-psp | 8081 | http://localhost:8081/actuator/health |
-| notification-service | 8082 | http://localhost:8082/actuator/health |
+| notification-service | 8082 | http://localhost:8082/actuator/health (a skeleton until #15) |
 | PostgreSQL 16 | 5432 | databases `ledgerpay` and `mockpsp` |
-| Kafka (KRaft) | 9092 | |
+| Kafka (KRaft) | 9092 | started, not yet used (#14) |
 
 ## Performance
 
@@ -93,6 +109,10 @@ The worker's PSP calls, one batch per operation, against a stub PSP in its own J
   - a batch of 200 calls took **148 ms instead of 224 ms**;
   - peak platform threads fell **from 146 to 30**;
   - a regression test asserts that no platform thread is started per call.
+- **The same leak on small machines** ([ADR 0008](docs/adr/0008-virtual-threads-for-psp-calls.md#decision)). The tests began failing intermittently on CI, and limiting them to two CPUs made them fail every time. Thread dumps and JFR found two causes:
+  - In the test stub only: its virtual threads pinned both carriers.
+  - In production code: the JDK HTTP client hands some stages to `CompletableFuture`'s default executor. With one or two CPUs, that executor starts a platform thread for every task, so every PSP call started one; small containers are exactly that case.
+  - The fix is `-Djava.util.concurrent.ForkJoinPool.common.parallelism=2` in the Dockerfile and the test JVMs, with a startup warning if it is missing. All 328 payment-service tests now pass on two CPUs.
 
 ## Scope
 
