@@ -36,6 +36,13 @@ Virtual threads match the largest pool on latency, and are 12 times faster than 
 
 `PspOperationWorkerIntegrationTest.pspCallsDoNotStartAPlatformThreadEach` keeps it that way: 6 platform threads started for a batch of 5 with the fallback, 0 with the fix.
 
+**On one or two CPUs the HTTP client starts a thread per request anyway (found 2026-10-05).** CI began to fail `concurrentWorkersNeverProcessTheSameOperation` intermittently, and limiting the tests to two CPUs (`taskset -c 0,1`) reproduced it every time, on `main` as well. Thread dumps and JFR showed two separate problems:
+
+- *In the test stub (test-only).* `StubPsp` served requests on virtual threads. On JDK 21, the built-in `HttpServer` reads a request body inside synchronized code, so a handler waiting for the body pins its carrier. Two such handlers pinned both carriers of a two-CPU machine. The HTTP client's virtual threads could then not run to send those bodies, and the calls ran into the read timeout together. `jdk.tracePinnedThreads` stayed silent; the dumps showed `parkOnCarrierThread` under `StubPsp` and a queue of virtual threads that had never run. The stub now uses 64 platform threads, all started before any test measures thread counts.
+- *In production.* JFR `jdk.ThreadStart` showed a platform thread per call, started by `CompletableFuture$ThreadPerTaskExecutor` from `Http1Response$HeadersReader`. The JDK HTTP client completes some stages with CompletableFuture's default executor, not with the executor it is given. That default is the common pool only when the pool's parallelism is at least 2. On one or two CPUs it is 1, and CompletableFuture starts a new thread for every task instead. ECS Fargate tasks with 0.5–2 vCPUs (#24) are exactly that case.
+
+The fix is `-Djava.util.concurrent.ForkJoinPool.common.parallelism=2`: in the Dockerfile, in the surefire and failsafe `argLine`, and for the mock-psp the acceptance tests start. `PspClient` logs a warning at startup if the parallelism is still below 2. With both fixes, `PspOperationWorkerIntegrationTest` passes on two CPUs; before, 2–3 of its 17 tests failed each run.
+
 ## Rejected alternatives
 
 | Alternative | Why not |
