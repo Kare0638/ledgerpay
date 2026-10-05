@@ -70,7 +70,7 @@ public class PspOperations {
                         LIMIT :limit
                           FOR UPDATE SKIP LOCKED)
                 RETURNING id, payment_id, type, psp_request_id, amount_minor, currency,
-                          psp_reference, attempts)
+                          psp_reference, attempts, failures)
             SELECT c.*, p.merchant_id,
                    (SELECT parent.psp_reference FROM psp_operations parent
                      WHERE parent.payment_id = c.payment_id AND parent.status = 'SUCCEEDED'
@@ -93,7 +93,8 @@ public class PspOperations {
                     rs.getString("currency"),
                     rs.getString("psp_reference"),
                     rs.getString("parent_reference"),
-                    rs.getInt("attempts")))
+                    rs.getInt("attempts"),
+                    rs.getInt("failures")))
         .list();
   }
 
@@ -107,7 +108,7 @@ public class PspOperations {
             UPDATE psp_operations
                SET psp_reference = :reference,
                    next_attempt_at = now() + :delayMillis * interval '1 millisecond',
-                   lease_until = NULL, last_error = NULL, updated_at = now()
+                   lease_until = NULL, last_error = NULL, failures = 0, updated_at = now()
              WHERE id = :id AND status = 'PENDING'""")
         .param("reference", pspReference)
         .param("delayMillis", safetyNetDelay.toMillis())
@@ -125,6 +126,7 @@ public class PspOperations {
             """
             UPDATE psp_operations
                SET last_error = :error, lease_until = NULL, needs_review = :review,
+                   failures = failures + 1,
                    next_attempt_at = now() + :retryMillis * interval '1 millisecond',
                    updated_at = now()
              WHERE id = :id AND status = 'PENDING'""")

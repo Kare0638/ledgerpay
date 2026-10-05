@@ -87,23 +87,25 @@ public class PspOperationWorker {
             operation.id(), outcome.pspReference(), properties.safetyNetDelay());
       }
       case PspResult.Unknown unknown -> {
-        boolean exhausted = operation.attempts() >= properties.maxAttempts();
+        // Only consecutive failures count: safety-net inquiries of an operation the PSP keeps
+        // pending raise attempts for hours without anything being wrong.
+        int failures = operation.failures() + 1;
+        boolean exhausted = failures >= properties.maxAttempts();
         Duration retryIn =
-            RetryBackoff.delay(
-                operation.attempts(), properties.maxBackoff(), ThreadLocalRandom.current());
+            RetryBackoff.delay(failures, properties.maxBackoff(), ThreadLocalRandom.current());
         operations.recordFailure(operation.id(), unknown.error(), retryIn, exhausted);
         if (exhausted) {
           // Alert: a human decides. Nothing is released or rolled back, as the outcome is unknown.
           log.error(
-              "PSP operation {} needs review after {} attempts: {}",
+              "PSP operation {} needs review after {} failed attempts: {}",
               operation.pspRequestId(),
-              operation.attempts(),
+              failures,
               unknown.error());
         } else {
           log.warn(
-              "PSP call for {} attempt {} failed, retrying in {} ms: {}",
+              "PSP call for {} failed {} times in a row, retrying in {} ms: {}",
               operation.pspRequestId(),
-              operation.attempts(),
+              failures,
               retryIn.toMillis(),
               unknown.error());
         }

@@ -104,7 +104,7 @@ class PspOperationWorkerIntegrationTest {
   Map<String, Object> row(UUID operationId) {
     return jdbc.sql(
             """
-            SELECT status, psp_reference, attempts, last_error, needs_review,
+            SELECT status, psp_reference, attempts, failures, last_error, needs_review,
                    lease_until IS NOT NULL AND lease_until > now() AS leased,
                    (extract(epoch FROM next_attempt_at - updated_at) * 1000)::bigint AS retry_in_ms,
                    next_attempt_at > now() + interval '14 minutes' AS safety_net_scheduled
@@ -300,9 +300,10 @@ class PspOperationWorkerIntegrationTest {
     verify(outcomes, never()).apply(any(), any());
   }
 
-  void setAttempts(Created op, int attempts) {
-    jdbc.sql("UPDATE psp_operations SET attempts = ? WHERE id = ?")
-        .params(attempts, op.operationId())
+  /** As if every earlier attempt had failed. */
+  void setFailedAttempts(Created op, int failures) {
+    jdbc.sql("UPDATE psp_operations SET attempts = ?, failures = ? WHERE id = ?")
+        .params(failures, failures, op.operationId())
         .update();
   }
 
@@ -310,9 +311,9 @@ class PspOperationWorkerIntegrationTest {
   void theBackoffDoublesWithEachAttemptUpToAMinute() {
     psp.respond(request -> Reply.of(502, ""));
     Created fourth = newAuthorisation(100);
-    setAttempts(fourth, 3);
+    setFailedAttempts(fourth, 3);
     Created ninth = newAuthorisation(200);
-    setAttempts(ninth, 8);
+    setFailedAttempts(ninth, 8);
 
     worker.runOnce();
 
@@ -324,13 +325,14 @@ class PspOperationWorkerIntegrationTest {
   @Test
   void afterTenAttemptsTheOperationNeedsReviewAndNothingElseChanges() {
     Created op = newAuthorisation(10_000);
-    setAttempts(op, 9);
+    setFailedAttempts(op, 9);
     psp.respond(request -> Reply.of(503, ""));
 
     worker.runOnce();
 
     var row = row(op.operationId());
     assertThat(row.get("attempts")).isEqualTo(10);
+    assertThat(row.get("failures")).isEqualTo(10);
     assertThat(row.get("needs_review")).isEqualTo(true);
     assertThat(row.get("status")).isEqualTo("PENDING");
     assertThat((String) row.get("last_error")).contains("503");
@@ -388,7 +390,28 @@ class PspOperationWorkerIntegrationTest {
     var row = row(op.operationId());
     assertThat(row.get("psp_reference")).isEqualTo("psp_kept");
     assertThat(row.get("attempts")).isEqualTo(2);
+    // Reaching the PSP clears the failure the lost response counted.
+    assertThat(row.get("failures")).isEqualTo(0);
     assertThat(row.get("last_error")).isNull();
+  }
+
+  @Test
+  void safetyNetInquiriesOfAPendingOperationDoNotCountTowardsReview() {
+    Created op = newAuthorisation(10_000);
+    // Accepted hours ago and inquired every 15 minutes since: many attempts, no failures.
+    jdbc.sql("UPDATE psp_operations SET psp_reference = 'psp_slow', attempts = 20 WHERE id = ?")
+        .param(op.operationId())
+        .update();
+    psp.respond(request -> Reply.of(503, ""));
+
+    worker.runOnce();
+
+    var row = row(op.operationId());
+    assertThat(row.get("attempts")).isEqualTo(21);
+    assertThat(row.get("failures")).isEqualTo(1);
+    assertThat(row.get("needs_review")).isEqualTo(false);
+    // Backs off as a first failure, not a 21st.
+    assertThat((Long) row.get("retry_in_ms")).isBetween(500L, 1000L);
   }
 
   @Test

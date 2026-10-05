@@ -176,7 +176,8 @@ class WorkerCrashIntegrationTest {
             "GBP",
             "psp_" + capture,
             null,
-            2);
+            2,
+            0);
     money.apply(
         claimed,
         new PspResult.Final(

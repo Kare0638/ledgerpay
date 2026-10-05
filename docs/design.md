@@ -251,6 +251,7 @@ CREATE TABLE psp_operations (
     succeeded_at     TIMESTAMPTZ,                      -- PSP success time, used by reconciliation
     resource_version INT         NOT NULL DEFAULT 0,
     attempts         INT         NOT NULL DEFAULT 0,
+    failures         INT         NOT NULL DEFAULT 0,   -- consecutive attempts that established nothing
     next_attempt_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
     lease_until      TIMESTAMPTZ,
     last_error       TEXT,
@@ -496,9 +497,9 @@ The PSP is then called **outside** any transaction:
 | PSP says "accepted" | Store `psp_reference`; set `next_attempt_at` to +15 min as a safety-net inquiry in case the webhook never arrives |
 | PSP returns a final state | Run the money transaction (9.3) |
 | Timeout, 5xx, connection error | Stay PENDING, record `last_error`, back off 1, 2, 4, 8 … s up to 60 s with jitter |
-| 10 automatic attempts | Set `needs_review`, alert; **business state unchanged**, reservation not released |
+| 10 consecutive failed attempts | Set `needs_review`, alert; **business state unchanged**, reservation not released |
 
-Backoff is 1, 2, 4, 8 … s capped at 60 s with equal jitter (half fixed, half random). A failed call releases the lease and sets `next_attempt_at`; operations with `needs_review` are never claimed. See [ADR 0004](adr/0004-unknown-outcomes-inquire-before-retry.md).
+Backoff follows the consecutive failures (`failures`, reset whenever the PSP is reached, so safety-net inquiries never add up): 1, 2, 4, 8 … s capped at 60 s with equal jitter (half fixed, half random). A failed call releases the lease and sets `next_attempt_at`; operations with `needs_review` are never claimed. See [ADR 0004](adr/0004-unknown-outcomes-inquire-before-retry.md).
 
 If a worker dies mid-flight, the lease expires and another worker picks the operation up. The fixed request ID and the journal unique key make the repeat harmless.
 

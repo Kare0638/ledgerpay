@@ -13,8 +13,8 @@ import org.springframework.boot.context.properties.ConfigurationProperties;
  * @param safetyNetDelay when an accepted operation is inquired in case its webhook never arrives
  * @param provider the PSP's name: the inbox provider and the {@code psp_receivable} account
  * @param webhookSecret the HMAC key shared with the PSP for its webhooks
- * @param maxAttempts after this many attempts that established nothing, the operation is set aside
- *     for review instead of being retried
+ * @param maxAttempts after this many consecutive attempts that established nothing, the operation
+ *     is set aside for review instead of being retried; reaching the PSP starts the count again
  * @param maxBackoff the longest wait between two attempts
  */
 @ConfigurationProperties("ledgerpay.psp")

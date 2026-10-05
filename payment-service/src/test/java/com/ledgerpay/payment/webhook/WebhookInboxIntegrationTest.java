@@ -426,7 +426,8 @@ class WebhookInboxIntegrationTest {
             "GBP",
             null,
             "psp_" + created.authRequestId(),
-            2);
+            2,
+            0);
     var inquiry =
         new PspResult.Final("psp_" + capture, true, null, Instant.parse("2026-10-01T09:00:00Z"), 2);
     Event webhook = Event.of("CAPTURE", capture, merchant, 10_000, "SUCCEEDED");
