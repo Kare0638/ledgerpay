@@ -6,6 +6,7 @@ import com.ledgerpay.common.money.Money;
 import com.ledgerpay.payment.api.DatabaseFailures;
 import com.ledgerpay.payment.payment.MoneyTransaction;
 import com.ledgerpay.payment.payment.MoneyTransaction.Outcome;
+import com.ledgerpay.payment.payment.MoneyTransaction.ReportedStatus;
 import com.ledgerpay.payment.payment.MoneyTransaction.Result;
 import com.ledgerpay.payment.psp.PspOperationType;
 import java.util.Currency;
@@ -83,7 +84,8 @@ public class InboxProcessor {
         switch (result) {
           case Result.Applied applied -> null;
           case Result.AlreadyApplied applied -> "Already applied";
-          case Result.Stale stale -> "Stale: older resource_version";
+          case Result.Stale stale -> stale.reason();
+          case Result.NotFinal notFinal -> "Not final: nothing to apply";
           case Result.Quarantined quarantined -> quarantined.reason();
         };
     if (result instanceof Result.Quarantined) {
@@ -101,15 +103,16 @@ public class InboxProcessor {
     } catch (JsonProcessingException e) {
       throw new IllegalStateException("Stored webhook " + pending.eventId() + " is unreadable", e);
     }
+    ReportedStatus status = ReportedStatus.valueOf(event.status());
     return new Outcome(
         event.pspRequestId(),
         event.pspReference(),
         event.merchantId(),
         PspOperationType.valueOf(event.operationType()),
         Money.of(event.amountMinor(), Currency.getInstance(event.currency())),
-        event.status().equals("SUCCEEDED"),
-        event.status().equals("FAILED") ? "PSP reported FAILED" : null,
-        event.status().equals("SUCCEEDED") ? event.occurredAt() : null,
+        status,
+        status == ReportedStatus.FAILED ? "PSP reported FAILED" : null,
+        status == ReportedStatus.SUCCEEDED ? event.occurredAt() : null,
         event.resourceVersion());
   }
 }

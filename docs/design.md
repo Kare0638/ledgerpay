@@ -315,6 +315,17 @@ CREATE TABLE inbox_events (
     PRIMARY KEY (provider, event_id)
 );
 
+-- V5__inbox_conflicts.sql: each distinct body that reused a stored event_id, byte for byte
+CREATE TABLE inbox_conflicts (
+    provider      TEXT        NOT NULL,
+    event_id      TEXT        NOT NULL,
+    payload_hash  TEXT        NOT NULL,
+    payload       TEXT        NOT NULL,
+    received_at   TIMESTAMPTZ NOT NULL DEFAULT now(),
+    PRIMARY KEY (provider, event_id, payload_hash),
+    FOREIGN KEY (provider, event_id) REFERENCES inbox_events (provider, event_id)
+);
+
 CREATE TABLE outbox_events (
     id            UUID PRIMARY KEY,         -- also the message eventId
     aggregate_id  UUID        NOT NULL,     -- paymentId, used as the Kafka key
@@ -325,7 +336,7 @@ CREATE TABLE outbox_events (
 );
 CREATE INDEX idx_outbox_unpublished ON outbox_events(created_at) WHERE published_at IS NULL;
 
--- V4__reconciliation.sql
+-- V6__reconciliation.sql (V4 and V5 went to #10 and #11)
 CREATE TABLE settlement_reports (
     id             UUID PRIMARY KEY,
     psp            TEXT        NOT NULL,
@@ -508,14 +519,14 @@ If a worker dies mid-flight, the lease expires and another worker picks the oper
 1. Read the raw body; verify `X-PSP-Timestamp` (5-minute tolerance) and `X-PSP-Signature` = `HMAC-SHA256(secret, timestamp + "." + rawBody)` with a constant-time comparison (`MessageDigest.isEqual`). Failure → 401.
 2. Schema validation failure → 400.
 3. Insert into `inbox_events`; return 200 **only after the insert commits**. If the database is unavailable return 503 so the PSP redelivers. Never acknowledge first and persist later.
-4. `(provider, event_id)` conflict: same payload → 200; different payload → 200, but record the conflict and alert without overwriting the original.
+4. `(provider, event_id)` conflict: same payload → 200; different payload → 200, but record the conflict (`inbox_conflicts`) and alert without overwriting the original.
 5. `InboxProcessor` validates the event against the `psp_operation` (request ID, merchant, type, amount, currency). Unknown operation or mismatched fields → `QUARANTINED`. Quarantined events never touch the ledger and never create payments.
 
 Webhook fields: `event_id`, `event_type`, `psp_request_id`, `psp_reference`, `merchant_id`, `amount_minor`, `currency`, `status`, `occurred_at`, `resource_version`.
 
 Implementation notes:
-- The operation type comes from `event_type` (`capture.succeeded` → CAPTURE), and only final statuses are accepted.
-- `payload_hash` is the SHA-256 of the raw body, so "same payload" means byte for byte. A conflicting body under a known `event_id` is logged at ERROR and acknowledged; the stored original is never changed.
+- The operation type comes from `event_type` (`capture.succeeded` → CAPTURE). `status` is SUCCEEDED, FAILED or PENDING; anything else is 400. A PENDING event is stored and processed like any other but never applied (section 9.3), so an event overtaken in delivery is acknowledged and leaves a record instead of being redelivered until the PSP gives up.
+- `payload_hash` is the SHA-256 of the raw body, so "same payload" means byte for byte. A conflicting body under a known `event_id` is logged at ERROR, kept once per distinct body in `inbox_conflicts`, and acknowledged; the stored original is never changed.
 - `InboxProcessor` claims one RECEIVED event at a time with `FOR UPDATE SKIP LOCKED` and marks it PROCESSED or QUARANTINED in the same transaction as the money transaction, so it is applied exactly once.
 - A temporary database failure leaves the event RECEIVED for the next poll. Any other exception would fail the same way forever, so the event is quarantined with the error instead of being retried.
 
@@ -525,8 +536,10 @@ Implementation notes:
 BEGIN
   SELECT … FROM payments WHERE id = ? FOR UPDATE        -- fixed lock order: payment → refund
   SELECT … FROM psp_operations WHERE id = ? FOR UPDATE
+  event does not match the operation → QUARANTINE (unknown request ID, merchant, type, amount, reference)
+  event reports PENDING             → never applied: "stale" if the operation is final, else nothing to do
   already in the same final state  → mark inbox PROCESSED, return
-  already in a different final state → QUARANTINE + alert; never roll back posted business
+  already in a different final state → QUARANTINE + alert, at any resource_version; never roll back posted business
   older resource_version            → ignore
   update operation status and succeeded_at; update payment/refund status and captured/refunded/reserved
   capture or refund succeeded       → insert journal and postings (psp_operation_id unique)

@@ -204,8 +204,8 @@ class WebhookInboxIntegrationTest {
   @Test
   void invalidBodiesAre400() {
     var notJson = SignedWebhooks.send(rest, "{not json");
-    var pending =
-        SignedWebhooks.send(rest, Event.of("AUTHORIZE", "req_x", merchant, 100, "PENDING").json());
+    var unknownStatus =
+        SignedWebhooks.send(rest, Event.of("AUTHORIZE", "req_x", merchant, 100, "REVERSED").json());
     var fractional =
         SignedWebhooks.send(
             rest,
@@ -219,7 +219,7 @@ class WebhookInboxIntegrationTest {
                 .json()
                 .replace("\"merchant_id\":", "\"merchant\":"));
 
-    assertThat(List.of(notJson, pending, fractional, missingField))
+    assertThat(List.of(notJson, unknownStatus, fractional, missingField))
         .allSatisfy(
             r -> {
               assertThat(r.getStatusCode().value()).isEqualTo(400);
@@ -251,9 +251,18 @@ class WebhookInboxIntegrationTest {
     SignedWebhooks.send(rest, original.json());
 
     var conflicting = SignedWebhooks.send(rest, original.withAmount(1).json());
+    SignedWebhooks.send(rest, original.withAmount(1).json());
+    SignedWebhooks.send(rest, original.withAmount(2).json());
 
     assertThat(conflicting.getStatusCode().value()).isEqualTo(200);
     assertThat(inbox(original.eventId()).get("amount")).isEqualTo("10000");
+    // Each distinct conflicting body is recorded once, exactly as received.
+    assertThat(
+            jdbc.sql("SELECT payload FROM inbox_conflicts WHERE event_id = ? ORDER BY payload")
+                .param(original.eventId())
+                .query(String.class)
+                .list())
+        .containsExactly(original.withAmount(1).json(), original.withAmount(2).json());
   }
 
   // --- the money transaction -----------------------------------------------------------------
@@ -404,6 +413,110 @@ class WebhookInboxIntegrationTest {
 
     assertThat(inbox(stale.eventId()).get("error")).isEqualTo("Stale: older resource_version");
     assertThat(operation(capture).get("status")).isEqualTo("PENDING");
+  }
+
+  @Test
+  void aStalePendingAfterTheOutcomeIsIgnoredNotQuarantined() {
+    Created created = authorised(10_000);
+    String capture = captureRequested(created);
+    Event succeeded = Event.of("CAPTURE", capture, merchant, 10_000, "SUCCEEDED");
+    deliver(succeeded);
+
+    Event pending =
+        succeeded
+            .withEventId("evt_" + UUID.randomUUID())
+            .withStatus("PENDING")
+            .withResourceVersion(1);
+    deliver(pending);
+
+    assertThat(inbox(pending.eventId()).get("status")).isEqualTo("PROCESSED");
+    assertThat(inbox(pending.eventId()).get("error")).isEqualTo("Stale: PENDING after SUCCEEDED");
+    assertThat(payment(created.paymentId()).get("status")).isEqualTo("CAPTURED");
+    assertThat(operation(capture).get("status")).isEqualTo("SUCCEEDED");
+    assertThat(journals(created.paymentId())).isEqualTo(1);
+    assertThat(outboxEvents(created.paymentId())).filteredOn("PaymentCaptured"::equals).hasSize(1);
+  }
+
+  @Test
+  void aPendingReportForAPendingOperationChangesNothing() {
+    Created created = authorised(10_000);
+    String capture = captureRequested(created);
+    Event pending =
+        Event.of("CAPTURE", capture, merchant, 10_000, "PENDING").withResourceVersion(1);
+
+    deliver(pending);
+
+    assertThat(inbox(pending.eventId()).get("status")).isEqualTo("PROCESSED");
+    assertThat(inbox(pending.eventId()).get("error")).isEqualTo("Not final: nothing to apply");
+    assertThat(payment(created.paymentId()).get("status")).isEqualTo("CAPTURE_PENDING");
+    assertThat(operation(capture).get("status")).isEqualTo("PENDING");
+    assertThat(outboxEvents(created.paymentId())).doesNotContain("PaymentCaptureFailed");
+  }
+
+  @Test
+  void aPendingEventThatDoesNotMatchOurRecordsIsQuarantined() {
+    Event unknown =
+        Event.of("CAPTURE", "req_unknown_" + UUID.randomUUID(), merchant, 10_000, "PENDING");
+
+    deliver(unknown);
+
+    assertThat(inbox(unknown.eventId()).get("status")).isEqualTo("QUARANTINED");
+  }
+
+  /**
+   * AT-08: nothing a sender gets wrong reaches the ledger. Bad signatures and stale timestamps are
+   * refused with 401 and never stored; signed events that do not match our records are kept as
+   * QUARANTINED with the reason, so each one can be traced.
+   */
+  @Test
+  void at08BadOrMismatchedWebhooksAre401OrQuarantinedAndNeverTouchTheLedger() {
+    Created created = authorised(10_000);
+    String capture = captureRequested(created);
+    long receivableBefore = balance("psp_receivable:mock-psp");
+    Event good = Event.of("CAPTURE", capture, merchant, 10_000, "SUCCEEDED");
+    byte[] body = good.json().getBytes(StandardCharsets.UTF_8);
+    long now = Instant.now().getEpochSecond();
+    long stale = now - 301;
+    byte[] secret = SignedWebhooks.SECRET.getBytes(StandardCharsets.UTF_8);
+
+    var badSignature =
+        SignedWebhooks.send(
+            rest,
+            good.json(),
+            String.valueOf(now),
+            WebhookSignature.sign("wrong-secret".getBytes(StandardCharsets.UTF_8), now, body));
+    var staleTimestamp =
+        SignedWebhooks.send(
+            rest, good.json(), String.valueOf(stale), WebhookSignature.sign(secret, stale, body));
+    Event wrongAmount = good.withEventId("evt_amount_" + UUID.randomUUID()).withAmount(9_999);
+    Event unknownRequest =
+        Event.of("CAPTURE", "req_unknown_" + UUID.randomUUID(), merchant, 10_000, "SUCCEEDED");
+    deliver(wrongAmount);
+    deliver(unknownRequest);
+
+    assertThat(List.of(badSignature, staleTimestamp))
+        .allSatisfy(r -> assertThat(r.getStatusCode().value()).isEqualTo(401));
+    assertThat(
+            jdbc.sql("SELECT count(*) FROM inbox_events WHERE event_id = ?")
+                .param(good.eventId())
+                .query(Long.class)
+                .single())
+        .isZero();
+    assertThat((String) inbox(wrongAmount.eventId()).get("error")).startsWith("amount");
+    assertThat((String) inbox(unknownRequest.eventId()).get("error"))
+        .startsWith("Unknown psp_request_id");
+    assertThat(List.of(wrongAmount, unknownRequest))
+        .allSatisfy(e -> assertThat(inbox(e.eventId()).get("status")).isEqualTo("QUARANTINED"));
+    assertThat(payment(created.paymentId()).get("status")).isEqualTo("CAPTURE_PENDING");
+    assertThat(journals(created.paymentId())).isZero();
+    assertThat(balance("psp_receivable:mock-psp")).isEqualTo(receivableBefore);
+    assertThat(
+            jdbc.sql("SELECT count(*) FROM payments WHERE merchant_id = ?")
+                .param(merchant)
+                .query(Long.class)
+                .single())
+        .as("never creates a payment")
+        .isEqualTo(1);
   }
 
   @Test
