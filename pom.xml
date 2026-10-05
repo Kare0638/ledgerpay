@@ -34,6 +34,10 @@
         <google-java-format.version>1.36.1</google-java-format.version>
         <jqwik.version>1.10.1</jqwik.version>
         <jmh.version>1.37</jmh.version>
+        <!-- Surefire and failsafe JVMs, as in the Dockerfile: with one or two CPUs the common pool's
+             parallelism drops below 2, and the JDK HTTP client then starts a platform thread per
+             request (ADR 0008). CI runners have four CPUs, so only small machines showed it. -->
+        <argLine>-Djava.util.concurrent.ForkJoinPool.common.parallelism=2</argLine>
     </properties>
 
     <dependencyManagement>

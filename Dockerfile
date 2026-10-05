@@ -19,4 +19,6 @@ RUN apt-get update && apt-get install -y --no-install-recommends curl && rm -rf 
 RUN useradd --system --uid 10001 app
 USER app
 COPY --from=build /app.jar /app/app.jar
-ENTRYPOINT ["java", "-jar", "/app/app.jar"]
+# With one or two CPUs the common pool's parallelism drops below 2, and the JDK HTTP client then
+# starts a platform thread per request (ADR 0008). Small containers are exactly that case.
+ENTRYPOINT ["java", "-Djava.util.concurrent.ForkJoinPool.common.parallelism=2", "-jar", "/app/app.jar"]

@@ -6,6 +6,9 @@ import java.net.http.HttpClient;
 import java.time.Instant;
 import java.util.concurrent.Executor;
 import java.util.concurrent.Executors;
+import java.util.concurrent.ForkJoinPool;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.http.MediaType;
 import org.springframework.http.client.JdkClientHttpRequestFactory;
@@ -37,6 +40,8 @@ public class PspClient {
       Integer resourceVersion,
       Instant succeededAt) {}
 
+  private static final Logger log = LoggerFactory.getLogger(PspClient.class);
+
   private final RestClient http;
 
   @Autowired
@@ -61,6 +66,15 @@ public class PspClient {
             .connectTimeout(properties.connectTimeout());
     if (httpExecutor != null) {
       client.executor(httpExecutor);
+    }
+    if (ForkJoinPool.getCommonPoolParallelism() < 2) {
+      // The HTTP client completes some stages with CompletableFuture's default executor, not its
+      // own. With a common pool below 2, that default starts a platform thread per task: one per
+      // PSP call on a machine with one or two CPUs. The Dockerfile sets the parallelism to 2.
+      log.warn(
+          "ForkJoinPool common parallelism is {}: every PSP call will start a platform thread."
+              + " Set -Djava.util.concurrent.ForkJoinPool.common.parallelism=2",
+          ForkJoinPool.getCommonPoolParallelism());
     }
     var requestFactory = new JdkClientHttpRequestFactory(client.build());
     requestFactory.setReadTimeout(properties.readTimeout());

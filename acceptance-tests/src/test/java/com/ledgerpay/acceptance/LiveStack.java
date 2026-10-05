@@ -81,6 +81,8 @@ final class LiveStack {
         new ProcessBuilder(
                 java,
                 "-Xmx256m",
+                // As in the Dockerfile (ADR 0008).
+                "-Djava.util.concurrent.ForkJoinPool.common.parallelism=2",
                 // Held past payment-service's 1 s read timeout, but short enough for a test.
                 "-Dmockpsp.faults.response-delay=3s",
                 "-jar",

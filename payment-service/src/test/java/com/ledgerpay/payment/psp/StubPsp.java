@@ -8,7 +8,9 @@ import java.nio.charset.StandardCharsets;
 import java.time.Duration;
 import java.util.List;
 import java.util.concurrent.CopyOnWriteArrayList;
-import java.util.concurrent.Executors;
+import java.util.concurrent.LinkedBlockingQueue;
+import java.util.concurrent.ThreadPoolExecutor;
+import java.util.concurrent.TimeUnit;
 import java.util.function.Function;
 
 /**
@@ -43,8 +45,21 @@ public final class StubPsp {
     } catch (IOException e) {
       throw new UncheckedIOException(e);
     }
-    // Virtual threads: never a bottleneck, and invisible to platform-thread counts in tests.
-    server.setExecutor(Executors.newVirtualThreadPerTaskExecutor());
+    // Platform threads, all started here. Not virtual threads: on JDK 21 the server reads a request
+    // body inside synchronized code, which pins the carrier while it waits for the client. With
+    // two CPUs, two such handlers pinned both carriers, the HTTP client's virtual threads could
+    // not send the bodies, and calls timed out. Started up front, these threads do not show in
+    // the platform-thread counts the worker tests make.
+    ThreadPoolExecutor handlers =
+        new ThreadPoolExecutor(
+            64,
+            64,
+            0,
+            TimeUnit.SECONDS,
+            new LinkedBlockingQueue<>(),
+            Thread.ofPlatform().name("stub-psp-", 0).daemon().factory());
+    handlers.prestartAllCoreThreads();
+    server.setExecutor(handlers);
     server.createContext(
         "/v1/operations",
         exchange -> {
