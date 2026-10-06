@@ -2,26 +2,26 @@
 
 A payment, double-entry ledger and settlement reconciliation service in Java 21 and Spring Boot, built around the failure modes that matter in payments: client retries, PSP timeouts with unknown outcomes, lost or duplicated webhooks, concurrent refunds, and books that disagree with the PSP's settlement report.
 
-> **Status (October 2026):** the core payment flow, the ledger and failure handling around the PSP are built and tested; refunds, the Kafka pipeline and reconciliation are next. Progress is tracked on the [milestones](https://github.com/Kare0638/ledgerpay/milestones).
+> **Status (October 2026):** the core payment flow with partial refunds, the ledger and failure handling around the PSP are built and tested; the Kafka pipeline and reconciliation are next. Progress is tracked on the [milestones](https://github.com/Kare0638/ledgerpay/milestones).
 
 ## Built and tested
 
 - **Idempotent payments API**: `Idempotency-Key` plus database unique constraints at three layers: request, merchant reference and journal ([ADR 0002](docs/adr/0002-idempotency-via-database-unique-constraints.md)). Fifty concurrent creates with one key make one payment (AT-02).
-- **Authorise, capture and void** against a simulated PSP. Every money operation is persisted first, called outside any transaction by a worker using `SKIP LOCKED` and leases, and confirmed asynchronously.
+- **Authorise, capture, void and refund** against a simulated PSP. Every money operation is persisted first, called outside any transaction by a worker using `SKIP LOCKED` and leases, and confirmed asynchronously.
 - **Unknown outcomes handled safely**: a timeout is never treated as a failure. Every retry inquires by a fixed request ID before it may resubmit, with exponential backoff. After 10 consecutive failures the operation is set aside for review, and the payment stays pending ([ADR 0004](docs/adr/0004-unknown-outcomes-inquire-before-retry.md)). A capture whose response is lost is found by inquiry and booked once (AT-06); a worker killed before or after the money commit never books twice (AT-13).
+- **Partial refunds with a transactional reservation**: accepting a refund locks the payment, checks captured − refunded − reserved and reserves the amount in one transaction. Success releases the reservation into a refund journal, failure releases it only, and an unknown outcome keeps it ([ADR 0005](docs/adr/0005-refund-reservation-with-pessimistic-locking.md)). Concurrent refunds over the limit get one 409 (AT-11), and a refund timed out by the PSP is booked once by inquiry (AT-12).
 - **Double-entry ledger with database-enforced invariants**: a deferred balance constraint, append-only journals and exactly one journal per settled operation ([ADR 0001](docs/adr/0001-money-as-integer-minor-units.md), [ADR 0003](docs/adr/0003-no-postings-on-authorisation-or-void.md)). Property-based tests with jqwik cover fees and posting rules.
 - **Signed webhooks through a persisted inbox**: HMAC with a timestamp window. Events are de-duplicated by event ID and by outcome. Stale events are ignored. Unknown, mismatched or contradicting events are quarantined with the reason, and conflicting bodies are kept for investigation (AT-07, AT-08, AT-09).
 - **A mock PSP with fault injection**: decline, timeout after commit, dropped, duplicated, out-of-order and delayed webhooks, used by acceptance tests that run payment-service against the real mock-psp process and PostgreSQL.
 - **Performance analysis**: a JMH benchmark of PSP calls on virtual threads against platform thread pools, and JFR recordings under k6 load ([below](#performance)).
 
-Acceptance tests from the [design's list](docs/design.md): AT-01 to AT-09 and AT-13 pass, 10 of 19.
+Acceptance tests from the [design's list](docs/design.md): AT-01 to AT-13 pass, 13 of 19.
 
 ## Planned
 
 | Milestone | What | Issues |
 |---|---|---|
-| M2: failure handling and events | Partial refunds with a transactional reservation, so concurrent refunds never exceed the capture | #12 |
-| | Merchant isolation: no cross-merchant reads (API-key authentication is in place) | #13 |
+| M2: failure handling and events | Merchant isolation: no cross-merchant reads (API-key authentication is in place) | #13 |
 | | Transactional outbox relay to Kafka. Outbox rows are already written in the money transaction; nothing publishes them yet | #14 |
 | | notification-service: idempotent consumer, signed merchant webhooks, dead-letter topic | #15 |
 | | CI quality gate and a README you can run end to end | #16 |
