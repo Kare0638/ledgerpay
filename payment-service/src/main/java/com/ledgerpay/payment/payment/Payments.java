@@ -97,6 +97,39 @@ public class Payments {
         .update();
   }
 
+  /** Holds {@code amount} of the refundable balance for a pending refund (design §5.4). */
+  @Transactional(propagation = Propagation.MANDATORY)
+  public void reserveRefund(UUID id, Money amount) {
+    jdbc.sql(
+            """
+            UPDATE payments
+               SET refund_reserved_minor = refund_reserved_minor + :amount,
+                   version = version + 1, updated_at = now()
+             WHERE id = :id""")
+        .param("amount", amount.minor())
+        .param("id", id)
+        .update();
+  }
+
+  /**
+   * Releases a refund's reservation once the PSP has answered: into {@code refunded_minor} if it
+   * succeeded, back to the refundable balance if it failed.
+   */
+  @Transactional(propagation = Propagation.MANDATORY)
+  public void settleRefund(UUID id, Money amount, boolean succeeded) {
+    jdbc.sql(
+            """
+            UPDATE payments
+               SET refund_reserved_minor = refund_reserved_minor - :amount,
+                   refunded_minor = refunded_minor + :refunded,
+                   version = version + 1, updated_at = now()
+             WHERE id = :id""")
+        .param("amount", amount.minor())
+        .param("refunded", succeeded ? amount.minor() : 0)
+        .param("id", id)
+        .update();
+  }
+
   public int feeBps(String merchantId) {
     return jdbc.sql("SELECT fee_bps FROM merchants WHERE id = ?")
         .param(merchantId)

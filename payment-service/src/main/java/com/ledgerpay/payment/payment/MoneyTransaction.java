@@ -75,6 +75,7 @@ public class MoneyTransaction implements PspOutcomeHandler {
   }
 
   private final Payments payments;
+  private final Refunds refunds;
   private final PspOperations operations;
   private final Ledger ledger;
   private final Outbox outbox;
@@ -82,11 +83,13 @@ public class MoneyTransaction implements PspOutcomeHandler {
 
   public MoneyTransaction(
       Payments payments,
+      Refunds refunds,
       PspOperations operations,
       Ledger ledger,
       Outbox outbox,
       PspProperties properties) {
     this.payments = payments;
+    this.refunds = refunds;
     this.operations = operations;
     this.ledger = ledger;
     this.outbox = outbox;
@@ -141,6 +144,10 @@ public class MoneyTransaction implements PspOutcomeHandler {
           outcome.failureReason());
     }
 
+    if (operation.type() == PspOperationType.REFUND) {
+      applyRefund(payment, operation, outcome);
+      return new Result.Applied();
+    }
     PaymentStatus next = next(payment.status(), operation.type(), outcome.succeeded());
     Money captured = payment.captured();
     if (operation.type() == PspOperationType.CAPTURE && outcome.succeeded()) {
@@ -184,6 +191,41 @@ public class MoneyTransaction implements PspOutcomeHandler {
     }
   }
 
+  /**
+   * A refund's answer (design §5.4). The payment's status does not change; its reservation is
+   * released either way, into the refunded amount and a refund journal only on success. A refund
+   * whose outcome is unknown never reaches this point, so its reservation stays.
+   */
+  private void applyRefund(Payment payment, OperationRow operation, Outcome outcome) {
+    boolean succeeded = outcome.succeeded();
+    payments.settleRefund(payment.id(), operation.amount(), succeeded);
+    if (succeeded) {
+      ledger.post(
+          operation.id(),
+          EntryType.REFUND,
+          PostingRules.refund(psp, payment.merchantId(), operation.amount()));
+    }
+    refunds.complete(
+        operation.refundId(), succeeded ? RefundStatus.SUCCEEDED : RefundStatus.FAILED);
+    Refund refund = refunds.find(payment.merchantId(), operation.refundId()).orElseThrow();
+    Map<String, Object> event = new LinkedHashMap<>();
+    event.put("refundId", refund.id());
+    event.put("paymentId", payment.id());
+    event.put("merchantId", payment.merchantId());
+    event.put("merchantReference", refund.merchantReference());
+    event.put("status", refund.status().name());
+    event.put("amountMinor", refund.amount().minor());
+    event.put("currency", refund.amount().currency().getCurrencyCode());
+    Money refunded = succeeded ? payment.refunded().plus(operation.amount()) : payment.refunded();
+    event.put("refundedMinor", refunded.minor());
+    event.put("pspOperationId", operation.id());
+    event.put("pspReference", outcome.pspReference());
+    if (!succeeded) {
+      event.put("failureReason", outcome.failureReason());
+    }
+    outbox.append(payment.id(), succeeded ? "RefundSucceeded" : "RefundFailed", event);
+  }
+
   private static String mismatch(Outcome outcome, Payment payment, OperationRow operation) {
     if (!payment.merchantId().equals(outcome.merchantId())) {
       return "merchant_id " + outcome.merchantId() + " does not match the payment";
@@ -216,8 +258,7 @@ public class MoneyTransaction implements PspOutcomeHandler {
       case AUTHORIZE -> succeeded ? PaymentStatus.AUTHORIZED : PaymentStatus.DECLINED;
       case CAPTURE -> succeeded ? PaymentStatus.CAPTURED : PaymentStatus.AUTHORIZED;
       case VOID -> succeeded ? PaymentStatus.VOIDED : PaymentStatus.AUTHORIZED;
-      // Refund reservation and booking arrive with #12; no refund operation can exist before.
-      case REFUND -> throw new UnsupportedOperationException("Refunds are not implemented yet");
+      case REFUND -> throw new IllegalArgumentException("A refund leaves the payment status alone");
     };
   }
 
@@ -226,7 +267,7 @@ public class MoneyTransaction implements PspOutcomeHandler {
       case AUTHORIZE -> succeeded ? "PaymentAuthorized" : "PaymentDeclined";
       case CAPTURE -> succeeded ? "PaymentCaptured" : "PaymentCaptureFailed";
       case VOID -> succeeded ? "PaymentVoided" : "PaymentVoidFailed";
-      case REFUND -> throw new UnsupportedOperationException("Refunds are not implemented yet");
+      case REFUND -> throw new IllegalArgumentException("Refund events are built by applyRefund");
     };
   }
 

@@ -162,7 +162,12 @@ refundable = captured_minor − refunded_minor − refund_reserved_minor
 - **Unknown / timeout:** keep the reservation. A timeout must never free refundable balance.
 - Database backstop: `CHECK (refunded_minor + refund_reserved_minor <= captured_minor)`.
 
-Pessimistic locking is used because the check is an aggregate read-compute-write; contention per payment is low, and optimistic retries of the whole command are easier to get wrong.
+Pessimistic locking is used because the check is an aggregate read-compute-write; contention per payment is low, and optimistic retries of the whole command are easier to get wrong. See [ADR 0005](adr/0005-refund-reservation-with-pessimistic-locking.md).
+
+Implementation notes:
+- A refund's merchant reference is unique per merchant. The same reference for the same payment and amount returns the existing refund, checked before the amount, so a retry is never refused because its own reservation used up the balance. With another payment or amount it is 409 `DUPLICATE_REFERENCE`.
+- Only a CAPTURED payment can be refunded (409 `INVALID_STATE`). The payment stays CAPTURED; `refundSummary` reports progress.
+- The answer is applied by the money transaction (section 9.3): the reservation is released, into `refunded_minor` and a refund journal on success, and the refund becomes SUCCEEDED or FAILED with a `RefundSucceeded` or `RefundFailed` outbox event.
 
 ### 5.5 Double-entry ledger
 
@@ -420,6 +425,8 @@ Every write requires an `Idempotency-Key` header.
 | GET | `/ops/recon-runs/{id}`, `/ops/recon-runs/{id}/items` | Run summary and item-level breaks | 200 | 404 |
 | POST | `/ops/psp-operations/{id}/inquiry` | Trigger a PSP status inquiry | 202 | 404 |
 | GET | `/actuator/health`, `/actuator/prometheus` | Health and metrics | 200 | |
+
+A refund is requested with `{ "merchantReference": "refund-1", "amountMinor": 3000, "reason": "returned" }`, in the payment's currency. The 202 response carries `refundId`, `paymentId`, `status` (PENDING) and `statusUrl` (`/v1/refunds/{id}`).
 
 Writes return **202 Accepted**, not 200: the money outcome is only known once the PSP confirms. Clients poll the resource or wait for a merchant webhook.
 
@@ -849,7 +856,7 @@ ledgerpay/
 | 0002 | Idempotency via database unique constraints, three layers |
 | 0003 | No ledger postings on authorisation or void |
 | 0004 | Unknown outcomes: inquire before any retry, fixed request IDs ([accepted](adr/0004-unknown-outcomes-inquire-before-retry.md)) |
-| 0005 | Refund reservation with pessimistic locking |
+| 0005 | Refund reservation with pessimistic locking ([accepted](adr/0005-refund-reservation-with-pessimistic-locking.md)) |
 | 0006 | Transactional outbox; at-least-once delivery with idempotent consumers |
 | 0007 | Reconciliation never mutates the ledger; UTC business days |
 | 0008 | Executor for PSP calls: virtual threads vs a platform thread pool, based on the JMH results |

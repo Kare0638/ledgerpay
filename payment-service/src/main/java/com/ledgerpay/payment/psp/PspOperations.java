@@ -33,14 +33,21 @@ public class PspOperations {
    */
   @Transactional(propagation = Propagation.MANDATORY)
   public UUID createPending(UUID paymentId, PspOperationType type, Money amount) {
+    return createPending(paymentId, null, type, amount);
+  }
+
+  /** As above, for the PSP call of a refund: {@code refundId} is set only for REFUND. */
+  @Transactional(propagation = Propagation.MANDATORY)
+  public UUID createPending(UUID paymentId, UUID refundId, PspOperationType type, Money amount) {
     UUID id = UUID.randomUUID();
     jdbc.sql(
             """
             INSERT INTO psp_operations
-                (id, payment_id, type, psp_request_id, amount_minor, currency, status)
-            VALUES (:id, :payment, :type, :request, :amount, :currency, 'PENDING')""")
+                (id, payment_id, refund_id, type, psp_request_id, amount_minor, currency, status)
+            VALUES (:id, :payment, :refund, :type, :request, :amount, :currency, 'PENDING')""")
         .param("id", id)
         .param("payment", paymentId)
+        .param("refund", refundId)
         .param("type", type.name())
         .param("request", "req_" + id)
         .param("amount", amount.minor())
@@ -141,6 +148,7 @@ public class PspOperations {
   public record OperationRow(
       UUID id,
       UUID paymentId,
+      UUID refundId,
       PspOperationType type,
       String pspRequestId,
       Money amount,
@@ -168,8 +176,8 @@ public class PspOperations {
   public OperationRow lock(String pspRequestId) {
     return jdbc.sql(
             """
-            SELECT id, payment_id, type, psp_request_id, amount_minor, currency, status,
-                   psp_reference, resource_version
+            SELECT id, payment_id, refund_id, type, psp_request_id, amount_minor, currency,
+                   status, psp_reference, resource_version
               FROM psp_operations WHERE psp_request_id = ? FOR UPDATE""")
         .param(pspRequestId)
         .query(
@@ -177,6 +185,7 @@ public class PspOperations {
                 new OperationRow(
                     rs.getObject("id", UUID.class),
                     rs.getObject("payment_id", UUID.class),
+                    rs.getObject("refund_id", UUID.class),
                     PspOperationType.valueOf(rs.getString("type")),
                     rs.getString("psp_request_id"),
                     Money.of(

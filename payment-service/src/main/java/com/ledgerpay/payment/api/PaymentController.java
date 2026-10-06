@@ -7,6 +7,7 @@ import com.ledgerpay.payment.idempotency.IdempotentExecutor;
 import com.ledgerpay.payment.idempotency.IdempotentResponse;
 import com.ledgerpay.payment.payment.Payment;
 import com.ledgerpay.payment.payment.PaymentService;
+import com.ledgerpay.payment.payment.Refund;
 import jakarta.validation.Valid;
 import java.util.Currency;
 import java.util.Optional;
@@ -29,6 +30,7 @@ public class PaymentController {
   static final String CREATE_SCOPE = "POST /v1/payments";
   static final String CAPTURE_SCOPE = "POST /v1/payments/{id}/capture";
   static final String VOID_SCOPE = "POST /v1/payments/{id}/void";
+  static final String REFUND_SCOPE = "POST /v1/payments/{id}/refunds";
   static final String IDEMPOTENCY_KEY = "Idempotency-Key";
   static final int MAX_KEY_LENGTH = 255;
 
@@ -85,6 +87,42 @@ public class PaymentController {
             new PaymentAction(id),
             () -> accepted(found(id, payments.voidPayment(merchant.id(), id)))));
   }
+
+  @PostMapping("/{id}/refunds")
+  ResponseEntity<JsonNode> refund(
+      @RequestAttribute(AuthenticatedMerchant.REQUEST_ATTRIBUTE) AuthenticatedMerchant merchant,
+      @RequestHeader(IDEMPOTENCY_KEY) String key,
+      @PathVariable UUID id,
+      @Valid @RequestBody CreateRefundRequest request) {
+    requireValidKey(key);
+    return respond(
+        idempotency.execute(
+            merchant.id(),
+            REFUND_SCOPE,
+            key,
+            new RefundAction(id, request),
+            () -> {
+              Refund refund =
+                  payments
+                      .refund(
+                          merchant.id(),
+                          id,
+                          request.merchantReference(),
+                          request.amountMinor(),
+                          request.reason())
+                      .orElseThrow(() -> new ResourceNotFoundException("Payment " + id));
+              return new IdempotentExecutor.Result(
+                  HttpStatus.ACCEPTED.value(),
+                  new RefundAcceptedResponse(
+                      refund.id(),
+                      refund.paymentId(),
+                      refund.status().name(),
+                      "/v1/refunds/" + refund.id()));
+            }));
+  }
+
+  /** A refund request for the request hash: the payment it is for is part of it. */
+  record RefundAction(UUID paymentId, CreateRefundRequest refund) {}
 
   /**
    * What a capture or void request is, for the request hash: the same key reused for another
