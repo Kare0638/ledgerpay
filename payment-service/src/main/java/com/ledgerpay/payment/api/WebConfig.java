@@ -1,5 +1,6 @@
 package com.ledgerpay.payment.api;
 
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.boot.web.servlet.FilterRegistrationBean;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
@@ -22,6 +23,16 @@ public class WebConfig {
       MerchantLookup merchants, ProblemWriter problems) {
     var registration = new FilterRegistrationBean<>(new ApiKeyAuthFilter(merchants, problems));
     registration.addUrlPatterns("/v1/*");
+    registration.setOrder(Ordered.HIGHEST_PRECEDENCE + 10);
+    return registration;
+  }
+
+  /** Operations endpoints, with their own key: a merchant key never opens them. */
+  @Bean
+  FilterRegistrationBean<OpsKeyAuthFilter> opsKeyAuthFilter(
+      @Value("${ledgerpay.ops.api-key-hash:}") String apiKeyHash, ProblemWriter problems) {
+    var registration = new FilterRegistrationBean<>(new OpsKeyAuthFilter(apiKeyHash, problems));
+    registration.addUrlPatterns("/ops/*");
     registration.setOrder(Ordered.HIGHEST_PRECEDENCE + 10);
     return registration;
   }

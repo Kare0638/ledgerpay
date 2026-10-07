@@ -404,7 +404,13 @@ CREATE TABLE processed_events (
 
 ## 7. API
 
-Merchants authenticate with `Authorization: Bearer <api-key>`. The key is stored as its SHA-256 in `merchants.api_key_hash`, which has a unique index. A plain hash is enough because keys are long and random, not passwords. **The merchant is always taken from the authenticated principal**; a merchant ID in the body can never override it. Operations endpoints use a separate ops key. Resources belonging to another merchant return 404, so existence is not leaked.
+Merchants authenticate with `Authorization: Bearer <api-key>`. The key is stored as its SHA-256 in `merchants.api_key_hash`, which has a unique index. A plain hash is enough because keys are long and random, not passwords. **The merchant is always taken from the authenticated principal**; a merchant ID in the body can never override it. Resources belonging to another merchant return 404, so existence is not leaked.
+
+Operations endpoints (`/ops/**`) use a separate ops key, also `Authorization: Bearer`. Only its SHA-256 is configured (`ledgerpay.ops.api-key-hash`, from `OPS_API_KEY_HASH`) and compared in constant time. With none configured the endpoints are off (401), and a merchant key never opens them.
+
+A merchant can read one account's balance: its own `merchant_payable:{merchantId}`. Any other account ID, another merchant's payable or a platform account, is 404. The balance is derived from postings with the ledger's sign convention (section 5.5), so it is negative while the platform owes the merchant money. Before the first posting it is 0.
+
+`POST /ops/psp-operations/{id}/inquiry` makes a pending operation due now and clears `needs_review` and its consecutive failures, so the worker inquires on its next poll (section 9.1). While a worker holds the operation's lease it is 409 `INVALID_STATE`: the worker would overwrite the reset with the failure count it claimed, so the operator tries again once the call ends. A final operation is 409 too. It is how an operator retries an operation set aside for review.
 
 Every response carries a trace ID in the `X-Trace-Id` header, in the body of 202 responses and in every Problem Details body. It always identifies the current request: stored idempotent responses have no trace ID, and a replay gets its own. Until distributed tracing arrives (section 13), it is generated per request by a servlet filter and put in the logging MDC.
 

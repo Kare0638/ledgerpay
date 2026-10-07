@@ -144,6 +144,50 @@ public class PspOperations {
         .update();
   }
 
+  public enum InquiryRequest {
+    /** Due now, with its failure count and any needs_review flag cleared. */
+    SCHEDULED,
+    /** Already SUCCEEDED or FAILED: there is nothing left to ask. */
+    FINAL,
+    /** A worker holds the lease and is calling the PSP: ask again once the call is over. */
+    IN_FLIGHT,
+    NOT_FOUND
+  }
+
+  /**
+   * An operator asks for the operation to be inquired now (design §7), typically one set aside for
+   * review (ADR 0004). It becomes due, needs_review is cleared and its consecutive failures start
+   * from zero; the worker's next attempt inquires before anything else.
+   *
+   * <p>Refused while a worker holds the lease. That worker decides needs_review and the backoff
+   * from the failure count it claimed, so a reset made during its call would be overwritten when
+   * the call fails: the operator would be told the inquiry is scheduled while the operation went
+   * back to review. Refusing keeps SCHEDULED true.
+   */
+  public InquiryRequest requestInquiry(UUID id) {
+    int updated =
+        jdbc.sql(
+                """
+                UPDATE psp_operations
+                   SET next_attempt_at = now(), needs_review = false, failures = 0,
+                       updated_at = now()
+                 WHERE id = :id AND status = 'PENDING'
+                   AND (lease_until IS NULL OR lease_until < now())""")
+            .param("id", id)
+            .update();
+    if (updated == 1) {
+      return InquiryRequest.SCHEDULED;
+    }
+    return jdbc.sql(
+            """
+            SELECT status = 'PENDING' AS pending FROM psp_operations WHERE id = ?""")
+        .param(id)
+        .query(Boolean.class)
+        .optional()
+        .map(pending -> pending ? InquiryRequest.IN_FLIGHT : InquiryRequest.FINAL)
+        .orElse(InquiryRequest.NOT_FOUND);
+  }
+
   /** An operation as the money transaction sees it. */
   public record OperationRow(
       UUID id,

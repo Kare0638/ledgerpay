@@ -38,6 +38,9 @@ ledgerpay:
     max-backoff: 60s
   inbox:
     poll-interval: 200ms
+  ops:
+    # Hex SHA-256 of the operations key for /ops/**; unset turns those endpoints off.
+    api-key-hash: ${OPS_API_KEY_HASH:}
 
 management:
   endpoints:
