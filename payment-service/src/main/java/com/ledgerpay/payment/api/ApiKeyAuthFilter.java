@@ -36,7 +36,7 @@ public class ApiKeyAuthFilter extends OncePerRequestFilter {
     Optional<AuthenticatedMerchant> merchant;
     try {
       merchant =
-          apiKey(request.getHeader(HttpHeaders.AUTHORIZATION))
+          bearerToken(request.getHeader(HttpHeaders.AUTHORIZATION))
               .flatMap(key -> merchants.byApiKeyHash(ApiKeys.hash(key)));
     } catch (DataAccessException e) {
       if (DatabaseFailures.isTemporary(e)) {
@@ -56,7 +56,8 @@ public class ApiKeyAuthFilter extends OncePerRequestFilter {
     chain.doFilter(request, response);
   }
 
-  private static Optional<String> apiKey(String authorization) {
+  /** The token of an {@code Authorization: Bearer <token>} header, if there is one. */
+  static Optional<String> bearerToken(String authorization) {
     // The scheme name is case-insensitive (RFC 9110 §11.1): "bearer" and "BEARER" are fine too.
     if (authorization == null
         || !authorization.regionMatches(true, 0, BEARER, 0, BEARER.length())) {

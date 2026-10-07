@@ -6,6 +6,7 @@ A payment, double-entry ledger and settlement reconciliation service in Java 21 
 
 ## Built and tested
 
+- **Merchant isolation**: API keys stored as SHA-256 hashes; the merchant always comes from the key. Another merchant's payments, refunds and balance are the same 404 as something that does not exist (AT-14). Operations endpoints take a separate key, which an operator uses to have the worker inquire again about an operation set aside for review.
 - **Idempotent payments API**: `Idempotency-Key` plus database unique constraints at three layers: request, merchant reference and journal ([ADR 0002](docs/adr/0002-idempotency-via-database-unique-constraints.md)). Fifty concurrent creates with one key make one payment (AT-02).
 - **Authorise, capture, void and refund** against a simulated PSP. Every money operation is persisted first, called outside any transaction by a worker using `SKIP LOCKED` and leases, and confirmed asynchronously.
 - **Unknown outcomes handled safely**: a timeout is never treated as a failure. Every retry inquires by a fixed request ID before it may resubmit, with exponential backoff. After 10 consecutive failures the operation is set aside for review, and the payment stays pending ([ADR 0004](docs/adr/0004-unknown-outcomes-inquire-before-retry.md)). A capture whose response is lost is found by inquiry and booked once (AT-06); a worker killed before or after the money commit never books twice (AT-13).
@@ -15,14 +16,13 @@ A payment, double-entry ledger and settlement reconciliation service in Java 21 
 - **A mock PSP with fault injection**: decline, timeout after commit, dropped, duplicated, out-of-order and delayed webhooks, used by acceptance tests that run payment-service against the real mock-psp process and PostgreSQL.
 - **Performance analysis**: a JMH benchmark of PSP calls on virtual threads against platform thread pools, and JFR recordings under k6 load ([below](#performance)).
 
-Acceptance tests from the [design's list](docs/design.md): AT-01 to AT-13 pass, 13 of 19.
+Acceptance tests from the [design's list](docs/design.md): AT-01 to AT-14 pass, 14 of 19.
 
 ## Planned
 
 | Milestone | What | Issues |
 |---|---|---|
-| M2: failure handling and events | Merchant isolation: no cross-merchant reads (API-key authentication is in place) | #13 |
-| | Transactional outbox relay to Kafka. Outbox rows are already written in the money transaction; nothing publishes them yet | #14 |
+| M2: failure handling and events | Transactional outbox relay to Kafka. Outbox rows are already written in the money transaction; nothing publishes them yet | #14 |
 | | notification-service: idempotent consumer, signed merchant webhooks, dead-letter topic | #15 |
 | | CI quality gate and a README you can run end to end | #16 |
 | M3: reconciliation and observability | Settlement CSV import, matching on a consistent snapshot with classified breaks, ledger integrity check, demo data | #17–#21 |
