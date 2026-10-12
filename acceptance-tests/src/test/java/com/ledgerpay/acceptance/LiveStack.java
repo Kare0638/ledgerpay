@@ -60,7 +60,8 @@ final class LiveStack {
   }
 
   /**
-   * payment-service, in this JVM, pointed at the stack. Its worker and inbox are driven by hand.
+   * payment-service, in this JVM, pointed at the stack. Its worker and inbox are driven by hand;
+   * there is no broker, so its outbox relay is off and events stay in the table.
    */
   static void paymentServiceProperties(DynamicPropertyRegistry registry) {
     registry.add("server.port", () -> PAYMENT_PORT);
@@ -72,6 +73,8 @@ final class LiveStack {
     registry.add("ledgerpay.psp.read-timeout", () -> "1s");
     registry.add("ledgerpay.psp.worker.enabled", () -> "false");
     registry.add("ledgerpay.inbox.processor.enabled", () -> "false");
+    registry.add("ledgerpay.outbox.relay.enabled", () -> "false");
+    registry.add("spring.kafka.admin.auto-create", () -> "false");
   }
 
   private static Process startMockPsp() {

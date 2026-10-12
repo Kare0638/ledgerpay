@@ -12,9 +12,25 @@ spring:
   task:
     scheduling:
       pool:
-        # The PSP worker and the inbox processor each get a thread: with Spring's default of one,
-        # webhooks waited behind every batch of PSP calls.
-        size: 2
+        # The PSP worker, the inbox processor and the outbox relay each get a thread: with
+        # Spring's default of one, webhooks waited behind every batch of PSP calls.
+        size: 3
+  kafka:
+    bootstrap-servers: ${KAFKA_BOOTSTRAP_SERVERS:localhost:9092}
+    producer:
+      # Design §10: acknowledged by every in-sync replica, and producer retries do not duplicate.
+      acks: all
+      properties:
+        enable.idempotence: true
+        # The relay holds its claimed rows until the broker answers, so a missing broker must fail
+        # in seconds, not the client's default minute (max.block.ms) or two (delivery.timeout.ms).
+        max.block.ms: 5000
+        request.timeout.ms: 5000
+        delivery.timeout.ms: 10000
+    admin:
+      # Kafka is not needed to start: payments and the ledger work without it (design §10).
+      fail-fast: false
+      operation-timeout: 5s
 
 logging:
   pattern:
@@ -38,6 +54,14 @@ ledgerpay:
     max-backoff: 60s
   inbox:
     poll-interval: 200ms
+  outbox:
+    topic: payments.events
+    partitions: 6
+    batch-size: 100
+    poll-interval: 200ms
+    publish-timeout: 15s
+    # Refusals of one event for what it is (too large, not serialisable) before it is quarantined.
+    max-rejections: 3
   ops:
     # Hex SHA-256 of the operations key for /ops/**; unset turns those endpoints off.
     api-key-hash: ${OPS_API_KEY_HASH:}
