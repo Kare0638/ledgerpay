@@ -42,6 +42,12 @@ Constraints:
 
 **Message:** key = payment ID; value = `{eventId, eventType, paymentId, occurredAt, data}`; headers `eventId`, `eventType`. The `EventPublisher` port keeps the relay independent of Kafka (an SQS adapter is #25).
 
+**The consumer side** (notification-service, #15, 2026-10-12) completes the "idempotent consumers" half:
+
+- An event whose `eventId` is in `processed_events` is skipped. The row is written with the delivery record in one transaction, after the merchant accepted the webhook.
+- A failed delivery is retried three times with exponential backoff, then dead-lettered to `payments.events.dlq`; a malformed event is dead-lettered at once. The offset is committed per record once it is handled either way.
+- The webhook carries `X-LedgerPay-Event-Id`. A crash after the POST but before the record re-sends it, so merchants de-duplicate too: at-least-once all the way to the merchant, effectively-once where each side de-duplicates.
+
 ## Rejected alternatives
 
 | Alternative | Why not |
@@ -81,3 +87,4 @@ Constraints:
   - with an unreachable broker the relay gives up in under 2.5 s for three events, nothing is marked, and the events are published once Kafka is reachable;
   - an event over the producer's 1 MB `max.request.size` fails with a real `RecordTooLargeException`, another payment's event in the same batch is published, and after three runs the event is quarantined with the exception in `last_error`.
 - Both classes also pass with the JVM limited to two CPUs (`taskset -c 0,1`, ADR 0008).
+- `NotificationDeliveryIntegrationTest` (Testcontainers Kafka and PostgreSQL, stub merchants): a signed webhook is delivered and recorded and the offset committed; **a duplicate event is delivered once** (without the `processed_events` check this test failed); a merchant that recovers within the retries gets the webhook once; **a merchant that keeps failing sends the event to the DLQ** after the attempt and three retries; a malformed event is dead-lettered and the next one still goes out; a merchant without an endpoint is recorded, not called. `KafkaConfigurationTest` checks that a malformed event is not retried and a failed delivery is.

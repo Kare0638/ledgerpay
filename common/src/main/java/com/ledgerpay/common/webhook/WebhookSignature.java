@@ -14,6 +14,9 @@ import javax.crypto.spec.SecretKeySpec;
  * PSP webhook signatures (design §9.2): {@code X-PSP-Signature} is the lowercase hex HMAC-SHA256 of
  * {@code timestamp + "." + rawBody}, keyed with the shared secret, and {@code X-PSP-Timestamp} is
  * Unix epoch seconds. The raw body is signed as sent, so it must be verified before it is parsed.
+ *
+ * <p>notification-service signs merchant webhooks the same way, under its own header names and with
+ * a secret per merchant (design §10).
  */
 public final class WebhookSignature {
 

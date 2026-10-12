@@ -1,9 +1,49 @@
 spring:
   application:
     name: notification-service
+  datasource:
+    url: ${DB_URL:jdbc:postgresql://localhost:5432/notification}
+    username: ${DB_USERNAME:ledgerpay}
+    password: ${DB_PASSWORD:ledgerpay}
+  kafka:
+    bootstrap-servers: ${KAFKA_BOOTSTRAP_SERVERS:localhost:9092}
+    consumer:
+      group-id: notification-service
+      # A new group starts from the oldest event, so nothing published before the first start is
+      # missed; processed_events makes the replay harmless.
+      auto-offset-reset: earliest
+    listener:
+      # Commit each record's offset once it has been handled: delivered and recorded, skipped as a
+      # duplicate, or sent to the dead-letter topic.
+      ack-mode: record
+    producer:
+      # Dead letters: as for the outbox relay, acknowledged by every in-sync replica.
+      acks: all
+      properties:
+        enable.idempotence: true
+    admin:
+      fail-fast: false
+      operation-timeout: 5s
 
 server:
   port: ${SERVER_PORT:8082}
+
+ledgerpay:
+  notification:
+    topic: payments.events
+    dead-letter-topic: payments.events.dlq
+    partitions: 6
+    connect-timeout: 2s
+    read-timeout: 5s
+    # Design §10: three retries with exponential backoff, then the dead-letter topic.
+    retry:
+      attempts: 3
+      initial-interval: 1s
+      multiplier: 2.0
+      max-interval: 10s
+  ops:
+    # Hex SHA-256 of the operations key for /ops/**; unset turns those endpoints off.
+    api-key-hash: ${OPS_API_KEY_HASH:}
 
 management:
   endpoints:

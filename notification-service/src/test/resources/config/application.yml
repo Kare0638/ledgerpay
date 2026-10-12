@@ -1,0 +1,8 @@
+# Loaded on top of the main application.yml in tests. Most tests have no broker: the listener does
+# not start and no topics are created. The Kafka tests turn both back on.
+spring:
+  kafka:
+    listener:
+      auto-startup: false
+    admin:
+      auto-create: false
