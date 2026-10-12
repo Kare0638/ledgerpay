@@ -1,5 +1,5 @@
-# Loaded on top of the main application.yml in tests. The PSP worker and the inbox processor are
-# driven explicitly, so nothing runs in the background behind a test.
+# Loaded on top of the main application.yml in tests. The PSP worker, the inbox processor and the
+# outbox relay are driven explicitly, so nothing runs in the background behind a test.
 ledgerpay:
   psp:
     worker:
@@ -7,3 +7,12 @@ ledgerpay:
   inbox:
     processor:
       enabled: false
+  outbox:
+    relay:
+      enabled: false
+
+spring:
+  kafka:
+    admin:
+      # No broker in most tests; the Kafka tests turn it back on.
+      auto-create: false

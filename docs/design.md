@@ -337,11 +337,14 @@ CREATE TABLE outbox_events (
     event_type    TEXT        NOT NULL,     -- PaymentCreated / PaymentAuthorized / PaymentCaptured / RefundSucceeded …
     payload       JSONB       NOT NULL,
     created_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
-    published_at  TIMESTAMPTZ
+    published_at  TIMESTAMPTZ,
+    seq           BIGINT GENERATED ALWAYS AS IDENTITY   -- V6: relay order (section 10)
 );
-CREATE INDEX idx_outbox_unpublished ON outbox_events(created_at) WHERE published_at IS NULL;
+CREATE INDEX idx_outbox_unpublished ON outbox_events(seq) WHERE published_at IS NULL;
+CREATE INDEX idx_outbox_unpublished_aggregate ON outbox_events(aggregate_id, seq)
+    WHERE published_at IS NULL;
 
--- V6__reconciliation.sql (V4 and V5 went to #10 and #11)
+-- V7__reconciliation.sql (V4, V5 and V6 went to #10, #11 and #14)
 CREATE TABLE settlement_reports (
     id             UUID PRIMARY KEY,
     psp            TEXT        NOT NULL,
@@ -616,16 +619,23 @@ Faults are selected through `POST /_admin/faults` with `{merchant_id, type?, fau
 Writing to the database and publishing to Kafka cannot share a transaction. Without an outbox, either the database commits and the event is lost, or the event is published and the database rolls back. The outbox stores the event in the same transaction as the business change; a relay publishes it afterwards.
 
 ```sql
-SELECT * FROM outbox_events
+SELECT * FROM outbox_events e
 WHERE published_at IS NULL
-ORDER BY created_at
+  AND NOT EXISTS (SELECT 1 FROM outbox_events earlier          -- only each payment's
+                  WHERE earlier.aggregate_id = e.aggregate_id  -- earliest unpublished event
+                    AND earlier.published_at IS NULL
+                    AND earlier.seq < e.seq)
+ORDER BY seq
 LIMIT 100
 FOR UPDATE SKIP LOCKED;
 ```
 
 - Publish to `payments.events` keyed by `aggregate_id` (payment ID) to preserve per-payment ordering.
-- Set `published_at` after the broker acknowledges. This is **at-least-once**: a crash between publish and update re-sends the event, so consumers must be idempotent.
-- Producer: `acks=all`, `enable.idempotence=true`.
+- Order by `seq`, taken at insert under the payment's lock, not `created_at` (the transaction's start time). A payment's next event waits until the previous one is published, so concurrent relays cannot reorder one payment's events; `SKIP LOCKED` lets them work on different payments.
+- Claim, publish, wait for the acknowledgements and set `published_at` in one transaction; unacknowledged events stay for the next run. This is **at-least-once**: a crash between publish and update re-sends the event, so consumers must be idempotent.
+- Producer: `acks=all`, `enable.idempotence=true`, and timeouts of seconds, because the relay holds its rows while it waits.
+- Message: key = payment ID; value = `{eventId, eventType, paymentId, occurredAt, data}`, where `eventId` is the outbox row's `id`; `eventId` and `eventType` are also headers.
+- See [ADR 0006](adr/0006-transactional-outbox-at-least-once.md).
 
 **notification-service**
 - Records `processed_events` and the delivery in one transaction; a duplicate `event_id` is skipped.
@@ -863,7 +873,7 @@ ledgerpay/
 | 0003 | No ledger postings on authorisation or void |
 | 0004 | Unknown outcomes: inquire before any retry, fixed request IDs ([accepted](adr/0004-unknown-outcomes-inquire-before-retry.md)) |
 | 0005 | Refund reservation with pessimistic locking ([accepted](adr/0005-refund-reservation-with-pessimistic-locking.md)) |
-| 0006 | Transactional outbox; at-least-once delivery with idempotent consumers |
+| 0006 | Transactional outbox; at-least-once delivery with idempotent consumers ([accepted](adr/0006-transactional-outbox-at-least-once.md)) |
 | 0007 | Reconciliation never mutates the ledger; UTC business days |
 | 0008 | Executor for PSP calls: virtual threads vs a platform thread pool, based on the JMH results |
 

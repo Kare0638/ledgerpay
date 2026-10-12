@@ -62,6 +62,7 @@ services:
       DB_URL: jdbc:postgresql://postgres:5432/ledgerpay
       PSP_BASE_URL: http://mock-psp:8080
       PSP_WEBHOOK_SECRET: dev-only-webhook-secret
+      KAFKA_BOOTSTRAP_SERVERS: kafka:29092
     ports:
       - "8080:8080"
     depends_on:
