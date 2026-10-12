@@ -179,6 +179,41 @@ class KafkaOutboxRelayIntegrationTest {
   }
 
   /**
+   * An event over the producer's max.request.size (1 MB) fails at once, like a missing broker, but
+   * is only that event's problem: other payments' events in the batch are published, and after
+   * max-rejections runs the event is quarantined.
+   */
+  @Test
+  void anEventTooLargeForKafkaIsQuarantinedWithoutHoldingBackOtherPayments() {
+    UUID tooLarge =
+        tx.execute(
+            status ->
+                outbox.append(
+                    UUID.randomUUID(), "PaymentCreated", Map.of("blob", "x".repeat(1_100_000))));
+    UUID paymentId = createPayment();
+
+    assertThat(relay.relayAll()).isEqualTo(1);
+    assertThat(records(paymentId, 1)).hasSize(1);
+    for (int run = 1; run < properties.maxRejections(); run++) {
+      assertThat(relay.relayAll()).isZero();
+    }
+
+    Map<String, Object> state =
+        jdbc.sql(
+                """
+                SELECT rejections, last_error, quarantined_at IS NOT NULL AS quarantined
+                  FROM outbox_events WHERE id = ?""")
+            .param(tooLarge)
+            .query()
+            .singleRow();
+    assertThat(state)
+        .containsEntry("rejections", properties.maxRejections())
+        .containsEntry("quarantined", true);
+    assertThat((String) state.get("last_error")).contains("RecordTooLargeException");
+    assertThat(published(tooLarge)).isFalse();
+  }
+
+  /**
    * With no broker the relay fails fast, the payment is unaffected and the event waits in the
    * table; once Kafka is reachable it is published.
    */

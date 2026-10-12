@@ -61,7 +61,7 @@ class OutboxRelayIntegrationTest {
         publisher,
         tx,
         new OutboxProperties(
-            "payments.events", 1, batchSize, Duration.ZERO, Duration.ofSeconds(5)));
+            "payments.events", 1, batchSize, Duration.ZERO, Duration.ofSeconds(5), 3));
   }
 
   OutboxRelay relay() {
@@ -166,6 +166,67 @@ class OutboxRelayIntegrationTest {
     assertThat(publisher.attempts).hasValue(1);
   }
 
+  Map<String, Object> rejectionState(UUID eventId) {
+    return jdbc.sql(
+            """
+            SELECT rejections, last_error, quarantined_at IS NOT NULL AS quarantined
+              FROM outbox_events WHERE id = ?""")
+        .param(eventId)
+        .query()
+        .singleRow();
+  }
+
+  /** A refusal of one event, too large say, is that event's problem: the batch goes on. */
+  @Test
+  void aRejectedEventDoesNotStopTheBatchOrHoldBackOtherPayments() {
+    UUID payment = UUID.randomUUID();
+    UUID tooLarge = append(payment, "PaymentCreated");
+    UUID behindIt = append(payment, "PaymentAuthorized");
+    List<UUID> others = new ArrayList<>();
+    for (int i = 0; i < 3; i++) {
+      others.add(append(UUID.randomUUID(), "PaymentCreated"));
+    }
+    publisher.rejectWhen(event -> event.id().equals(tooLarge));
+
+    OutboxRelay.Batch batch = relay().relayBatch();
+
+    assertThat(batch).isEqualTo(new OutboxRelay.Batch(4, 3));
+    assertThat(publisher.ids()).containsExactlyElementsOf(others);
+    assertThat(published(tooLarge)).isFalse();
+    assertThat(published(behindIt)).isFalse();
+    assertThat(rejectionState(tooLarge))
+        .containsEntry("rejections", 1)
+        .containsEntry("quarantined", false);
+    assertThat((String) rejectionState(tooLarge).get("last_error")).contains("too large");
+  }
+
+  /**
+   * After max-rejections refusals the event is quarantined: no longer claimed, so it stops taking a
+   * place in every batch. Its payment's later events stay behind it; other payments carry on.
+   */
+  @Test
+  void anEventRejectedMaxRejectionsTimesIsQuarantinedAndOnlyItsPaymentWaits() {
+    UUID payment = UUID.randomUUID();
+    UUID poison = append(payment, "PaymentCreated");
+    UUID behindIt = append(payment, "PaymentAuthorized");
+    publisher.rejectWhen(event -> event.id().equals(poison));
+
+    for (int run = 0; run < 3; run++) {
+      assertThat(relay().relayAll()).isZero();
+    }
+    assertThat(rejectionState(poison))
+        .containsEntry("rejections", 3)
+        .containsEntry("quarantined", true);
+
+    UUID later = append(UUID.randomUUID(), "PaymentCreated");
+    assertThat(relay().relayAll()).isEqualTo(1);
+
+    assertThat(publisher.ids()).containsExactly(later);
+    assertThat(publisher.attempts).hasValue(4);
+    assertThat(published(poison)).isFalse();
+    assertThat(published(behindIt)).isFalse();
+  }
+
   /**
    * The relay dies after the broker acknowledged but before its transaction commits. The event is
    * still unpublished, and the next run sends it again with the same eventId: at-least-once.
@@ -262,6 +323,7 @@ class OutboxRelayIntegrationTest {
     final AtomicInteger attempts = new AtomicInteger();
     volatile Predicate<OutboxEvent> nack = event -> false;
     volatile Predicate<OutboxEvent> thrown = event -> false;
+    volatile Predicate<OutboxEvent> rejected = event -> false;
     volatile Duration delay = Duration.ZERO;
 
     void failWhen(Predicate<OutboxEvent> predicate) {
@@ -270,6 +332,11 @@ class OutboxRelayIntegrationTest {
 
     void throwWhen(Predicate<OutboxEvent> predicate) {
       thrown = predicate;
+    }
+
+    /** Refused at once for what the event is, as Kafka refuses a record that is too large. */
+    void rejectWhen(Predicate<OutboxEvent> predicate) {
+      rejected = predicate;
     }
 
     List<UUID> ids() {
@@ -281,6 +348,9 @@ class OutboxRelayIntegrationTest {
       attempts.incrementAndGet();
       if (thrown.test(event)) {
         throw new IllegalStateException("no metadata for the topic");
+      }
+      if (rejected.test(event)) {
+        return CompletableFuture.failedFuture(new EventRejected("record too large"));
       }
       if (nack.test(event)) {
         // A broker refuses after the send returns, as Kafka does; a future that has already
@@ -299,6 +369,22 @@ class OutboxRelayIntegrationTest {
       }
       sent.add(event);
       return CompletableFuture.completedFuture(null);
+    }
+
+    @Override
+    public boolean rejectsEvent(Throwable failure) {
+      for (Throwable cause = failure; cause != null; cause = cause.getCause()) {
+        if (cause instanceof EventRejected) {
+          return true;
+        }
+      }
+      return false;
+    }
+  }
+
+  static class EventRejected extends RuntimeException {
+    EventRejected(String message) {
+      super(message);
     }
   }
 }

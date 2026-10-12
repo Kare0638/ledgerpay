@@ -338,13 +338,16 @@ CREATE TABLE outbox_events (
     payload       JSONB       NOT NULL,
     created_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
     published_at  TIMESTAMPTZ,
-    seq           BIGINT GENERATED ALWAYS AS IDENTITY   -- V6: relay order (section 10)
+    seq           BIGINT GENERATED ALWAYS AS IDENTITY,  -- V6: relay order (section 10)
+    rejections    INT NOT NULL DEFAULT 0,  -- V7: refusals of the event itself (section 10)
+    last_error    TEXT,
+    quarantined_at TIMESTAMPTZ             -- set after max-rejections; never claimed again
 );
 CREATE INDEX idx_outbox_unpublished ON outbox_events(seq) WHERE published_at IS NULL;
 CREATE INDEX idx_outbox_unpublished_aggregate ON outbox_events(aggregate_id, seq)
     WHERE published_at IS NULL;
 
--- V7__reconciliation.sql (V4, V5 and V6 went to #10, #11 and #14)
+-- V8__reconciliation.sql (V4 to V7 went to #10, #11 and #14)
 CREATE TABLE settlement_reports (
     id             UUID PRIMARY KEY,
     psp            TEXT        NOT NULL,
@@ -620,7 +623,7 @@ Writing to the database and publishing to Kafka cannot share a transaction. With
 
 ```sql
 SELECT * FROM outbox_events e
-WHERE published_at IS NULL
+WHERE published_at IS NULL AND quarantined_at IS NULL
   AND NOT EXISTS (SELECT 1 FROM outbox_events earlier          -- only each payment's
                   WHERE earlier.aggregate_id = e.aggregate_id  -- earliest unpublished event
                     AND earlier.published_at IS NULL
@@ -633,6 +636,7 @@ FOR UPDATE SKIP LOCKED;
 - Publish to `payments.events` keyed by `aggregate_id` (payment ID) to preserve per-payment ordering.
 - Order by `seq`, taken at insert under the payment's lock, not `created_at` (the transaction's start time). A payment's next event waits until the previous one is published, so concurrent relays cannot reorder one payment's events; `SKIP LOCKED` lets them work on different payments.
 - Claim, publish, wait for the acknowledgements and set `published_at` in one transaction; unacknowledged events stay for the next run. This is **at-least-once**: a crash between publish and update re-sends the event, so consumers must be idempotent.
+- A failure is the broker's or the event's (`EventPublisher.rejectsEvent`; for Kafka, a record too large, not serialisable or invalid). The broker's stops the batch and counts against nothing. The event's lets the batch go on and is counted; after `max-rejections` (3) the event is quarantined: not claimed again, an alert, and its payment's later events wait behind it while other payments carry on.
 - Producer: `acks=all`, `enable.idempotence=true`, and timeouts of seconds, because the relay holds its rows while it waits.
 - Message: key = payment ID; value = `{eventId, eventType, paymentId, occurredAt, data}`, where `eventId` is the outbox row's `id`; `eventId` and `eventType` are also headers.
 - See [ADR 0006](adr/0006-transactional-outbox-at-least-once.md).

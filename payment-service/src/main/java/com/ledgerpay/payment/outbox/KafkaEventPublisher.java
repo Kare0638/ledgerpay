@@ -6,6 +6,9 @@ import com.fasterxml.jackson.databind.node.ObjectNode;
 import java.nio.charset.StandardCharsets;
 import java.util.concurrent.CompletableFuture;
 import org.apache.kafka.clients.producer.ProducerRecord;
+import org.apache.kafka.common.InvalidRecordException;
+import org.apache.kafka.common.errors.RecordTooLargeException;
+import org.apache.kafka.common.errors.SerializationException;
 import org.springframework.kafka.core.KafkaTemplate;
 import org.springframework.stereotype.Component;
 
@@ -44,6 +47,23 @@ class KafkaEventPublisher implements EventPublisher {
     return kafka.send(record).thenApply(result -> null);
   }
 
+  /**
+   * Only failures that name the record itself. Everything else, including timeouts, a missing topic
+   * and authorisation errors, could hit every event alike, so it is left to stop the batch rather
+   * than count against one event.
+   */
+  @Override
+  public boolean rejectsEvent(Throwable failure) {
+    for (Throwable cause = failure; cause != null; cause = cause.getCause()) {
+      if (cause instanceof RecordTooLargeException
+          || cause instanceof SerializationException
+          || cause instanceof InvalidRecordException) {
+        return true;
+      }
+    }
+    return false;
+  }
+
   private String envelope(OutboxEvent event) {
     ObjectNode envelope = json.createObjectNode();
     envelope.put("eventId", event.id().toString());
@@ -53,7 +73,7 @@ class KafkaEventPublisher implements EventPublisher {
     try {
       envelope.set("data", json.readTree(event.payload()));
     } catch (JsonProcessingException e) {
-      throw new IllegalStateException("Outbox event " + event.id() + " is not JSON", e);
+      throw new SerializationException("Outbox event " + event.id() + " is not JSON", e);
     }
     return envelope.toString();
   }

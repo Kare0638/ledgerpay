@@ -44,7 +44,9 @@ public class Outbox {
    * unpublished event of each payment is eligible: a payment's next event waits until this one is
    * published, so concurrent relays never put one payment's events out of order. {@code SKIP
    * LOCKED} lets them take other payments' events meanwhile. A relay that sees an earlier event
-   * still unpublished, because another relay holds it, skips the payment for this round.
+   * still unpublished, because another relay holds it, skips the payment for this round. A
+   * quarantined event is never claimed, and as it stays unpublished it holds back the rest of its
+   * payment until a human has dealt with it.
    */
   @Transactional(propagation = Propagation.MANDATORY)
   public List<OutboxEvent> claimUnpublished(int limit) {
@@ -52,7 +54,7 @@ public class Outbox {
             """
             SELECT id, seq, aggregate_id, event_type, payload::text AS payload, created_at
               FROM outbox_events e
-             WHERE published_at IS NULL
+             WHERE published_at IS NULL AND quarantined_at IS NULL
                AND NOT EXISTS (
                    SELECT 1 FROM outbox_events earlier
                     WHERE earlier.aggregate_id = e.aggregate_id
@@ -72,6 +74,26 @@ public class Outbox {
                     rs.getString("payload"),
                     rs.getTimestamp("created_at").toInstant()))
         .list();
+  }
+
+  /**
+   * Counts a refusal of the event for what it is; at {@code maxRejections} it is quarantined.
+   * Returns whether it now is.
+   */
+  @Transactional(propagation = Propagation.MANDATORY)
+  public boolean recordRejection(UUID id, String error, int maxRejections) {
+    return jdbc.sql(
+            """
+            UPDATE outbox_events
+               SET rejections = rejections + 1, last_error = :error,
+                   quarantined_at = CASE WHEN rejections + 1 >= :max THEN now() END
+             WHERE id = :id
+            RETURNING quarantined_at IS NOT NULL""")
+        .param("error", error.length() <= 1000 ? error : error.substring(0, 1000))
+        .param("max", maxRejections)
+        .param("id", id)
+        .query(Boolean.class)
+        .single();
   }
 
   @Transactional(propagation = Propagation.MANDATORY)
