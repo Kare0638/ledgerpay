@@ -2,7 +2,7 @@
 
 A payment, double-entry ledger and settlement reconciliation service in Java 21 and Spring Boot, built around the failure modes that matter in payments: client retries, PSP timeouts with unknown outcomes, lost or duplicated webhooks, concurrent refunds, and books that disagree with the PSP's settlement report.
 
-> **Status (October 2026):** the core payment flow with partial refunds, the ledger, failure handling around the PSP and the event pipeline to signed merchant webhooks are built and tested; reconciliation is next. Progress is tracked on the [milestones](https://github.com/Kare0638/ledgerpay/milestones).
+> **Status (October 2026):** the core payment flow with partial refunds, the ledger, failure handling around the PSP and the event pipeline to signed merchant webhooks are built and tested, and the whole flow runs with one command ([quick start](#quick-start)); reconciliation is next. Progress is tracked on the [milestones](https://github.com/Kare0638/ledgerpay/milestones).
 
 ## Built and tested
 
@@ -16,6 +16,7 @@ A payment, double-entry ledger and settlement reconciliation service in Java 21 
 - **Transactional outbox to Kafka**: every event is written in the transaction that makes the change, so a rollback leaves none. A relay publishes to `payments.events` keyed by payment ID (`acks=all`, idempotent producer) and marks events only after the broker acknowledges: at-least-once, with the outbox ID as `eventId` for consumers to de-duplicate. A payment's next event waits until the previous one is published, so concurrent relays cannot reorder it. With Kafka down, payments carry on and events wait in the table ([ADR 0006](docs/adr/0006-transactional-outbox-at-least-once.md)).
 - **Signed merchant webhooks from Kafka**: notification-service consumes `payments.events`, skips event IDs it has processed, and POSTs the event to the merchant's endpoint, signed with a per-merchant secret it generates at registration. A failing merchant is retried three times with exponential backoff, then the event goes to `payments.events.dlq`; a malformed event goes there at once ([ADR 0006](docs/adr/0006-transactional-outbox-at-least-once.md)).
 - **A mock PSP with fault injection**: decline, timeout after commit, dropped, duplicated, out-of-order and delayed webhooks, used by acceptance tests that run payment-service against the real mock-psp process and PostgreSQL.
+- **CI quality gate**: every push runs the unit, Testcontainers and acceptance tests, and fails below 80 % line coverage in any module ([below](#running-the-tests)).
 - **Performance analysis**: a JMH benchmark of PSP calls on virtual threads against platform thread pools, and JFR recordings under k6 load ([below](#performance)).
 
 Acceptance tests from the [design's list](docs/design.md): AT-01 to AT-14 pass, 14 of 19.
@@ -24,7 +25,6 @@ Acceptance tests from the [design's list](docs/design.md): AT-01 to AT-14 pass, 
 
 | Milestone | What | Issues |
 |---|---|---|
-| M2: failure handling and events | CI quality gate and a README you can run end to end | #16 |
 | M3: reconciliation and observability | Settlement CSV import, matching on a consistent snapshot with classified breaks, ledger integrity check, demo data | #17–#21 |
 | | Metrics, Grafana dashboard, alert rules, structured logs | #22 |
 | M4: performance and cloud | Published k6 results, Terraform for ECS Fargate and RDS | #23, #24 |
@@ -51,24 +51,104 @@ Java 21 · Spring Boot 3 · PostgreSQL 16 · Flyway · Apache Kafka · Testconta
 
 Planned: Micrometer / Prometheus / Grafana · Terraform · AWS (ECS Fargate, RDS)
 
-## Running locally
+## Quick start
 
-Requires JDK 21 and Docker.
+Prerequisites: Docker with Compose v2, bash and curl. JDK 21 only to run the tests outside Docker.
 
 ```bash
-./mvnw test                                    # unit + Testcontainers integration tests
-./mvnw verify                                  # + acceptance tests against the real mock-psp, + format check
-./mvnw spotless:apply                          # fix formatting
-docker compose -f infra/docker-compose.yml up --build -d
+git clone https://github.com/Kare0638/ledgerpay.git && cd ledgerpay
+scripts/demo.sh
 ```
+
+[`scripts/demo.sh`](scripts/demo.sh) builds and starts the stack, seeds merchant `m_demo` with a new API key, registers its webhook endpoint, then pays £100, captures it and refunds £30. At each step it checks the money effect, not just the HTTP status:
+
+- the ledger has two balanced journals for the payment;
+- the merchant payable moved by −6900 (−9900 on capture, with the 1 % fee kept, then +3000 on refund);
+- every event reached Kafka through the outbox;
+- every event was delivered to the merchant as a signed webhook.
+
+It stops with `FAILED` on the first mismatch. The first build downloads Maven dependencies and takes a few minutes. `scripts/demo.sh --fresh` first deletes the stack's volumes, for a database left by an older checkout.
+
+### The same flow by hand
+
+With the stack up, `KEY` set to the key the demo printed and `PAYMENT` to the `paymentId` the first call returns:
+
+```bash
+curl -s -X POST localhost:8080/v1/payments -H "Authorization: Bearer $KEY" \
+  -H 'Idempotency-Key: order-1' -H 'Content-Type: application/json' \
+  -d '{"merchantReference":"order-1","amountMinor":10000,"currency":"GBP"}'
+# 202 {"paymentId":"…","status":"AUTH_PENDING",…}; mock-psp authorises it by webhook within a second
+
+curl -s localhost:8080/v1/payments/$PAYMENT -H "Authorization: Bearer $KEY"          # AUTHORIZED
+curl -s -X POST localhost:8080/v1/payments/$PAYMENT/capture \
+  -H "Authorization: Bearer $KEY" -H 'Idempotency-Key: order-1-capture'               # then CAPTURED
+curl -s -X POST localhost:8080/v1/payments/$PAYMENT/refunds -H "Authorization: Bearer $KEY" \
+  -H 'Idempotency-Key: order-1-refund-1' -H 'Content-Type: application/json' \
+  -d '{"merchantReference":"order-1-refund-1","amountMinor":3000,"reason":"damaged"}'
+curl -s localhost:8080/v1/accounts/merchant_payable:m_demo/balance -H "Authorization: Bearer $KEY"
+```
+
+Repeating a request with the same `Idempotency-Key` returns the first response; the same key with a different body is a 422. The full API is in [design §7](docs/design.md).
+
+### Triggering faults
+
+mock-psp runs with the `dev` profile in Compose, which enables `/_admin/faults`. A rule applies to the merchant's next operations of one type:
+
+```bash
+curl -s -X POST localhost:8081/_admin/faults -H 'Content-Type: application/json' \
+  -d '{"merchant_id":"m_demo","type":"CAPTURE","fault":"TIMEOUT_AFTER_COMMIT","times":1}'
+curl -s localhost:8081/_admin/faults                  # the active rules
+curl -s -X DELETE localhost:8081/_admin/faults        # clear them all
+```
+
+| Fault | What to watch |
+|---|---|
+| `DECLINE` | On `AUTHORIZE`: the payment ends `DECLINED`, with no journal |
+| `TIMEOUT_AFTER_COMMIT` | The PSP commits but the response is lost: the worker inquires, and the capture is booked once |
+| `DUPLICATE_WEBHOOK` | Twelve deliveries of one outcome, one journal |
+| `OUT_OF_ORDER` | A stale `PENDING` after the outcome is ignored |
+| `DELAY_WEBHOOK` | The payment stays pending until the late webhook arrives |
+| `DROP_WEBHOOK` | The outcome is never sent: the payment stays pending until the safety-net inquiry (15 minutes) or, later, reconciliation |
+
+Operation types are `AUTHORIZE`, `CAPTURE`, `VOID` and `REFUND`. Each fault also has an acceptance test that asserts both databases (AT-06 to AT-09, AT-12).
+
+### Services
 
 | Service | Port | Health |
 |---|---|---|
 | payment-service | 8080 | http://localhost:8080/actuator/health |
 | mock-psp | 8081 | http://localhost:8081/actuator/health |
 | notification-service | 8082 | http://localhost:8082/actuator/health; register a merchant endpoint with `PUT /ops/merchants/{id}/webhook-endpoint` and the local ops key `dev-only-ops-key` |
-| PostgreSQL 16 | 5432 | databases `ledgerpay`, `mockpsp` and `notification` (created on a fresh volume; with an older one, `CREATE DATABASE notification` or `docker compose down -v`) |
+| merchant-webhook-sink | — | Stands in for the merchant: `docker compose -f infra/docker-compose.yml logs merchant-webhook-sink` shows each signed delivery |
+| PostgreSQL 16 | 5432 | databases `ledgerpay`, `mockpsp` and `notification`, user and password `ledgerpay` |
 | Kafka (KRaft) | 9092 | `payments.events` (outbox relay → notification-service), `payments.events.dlq` |
+
+Stop the stack with `docker compose -f infra/docker-compose.yml down`; add `-v` to delete its data.
+
+## Running the tests
+
+Requires JDK 21 and a running Docker daemon (Testcontainers starts PostgreSQL and Kafka).
+
+```bash
+./mvnw test             # unit + Testcontainers integration tests
+./mvnw verify           # + acceptance tests against the real mock-psp, format check, coverage gate
+./mvnw spotless:apply   # fix formatting
+```
+
+[CI](.github/workflows/ci.yml) runs `./mvnw verify` on every push and pull request. JaCoCo fails the build when any module is below 80 % line coverage, counting unit and integration tests; the job summary shows each module's coverage, and the HTML reports are kept as an artifact. Currently 92–96 % per module.
+
+## Architecture decisions
+
+| ADR | Decision |
+|---|---|
+| [0001](docs/adr/0001-money-as-integer-minor-units.md) | Money as integer minor units; HALF_UP fee rounding |
+| [0002](docs/adr/0002-idempotency-via-database-unique-constraints.md) | Idempotency via database unique constraints, in three layers |
+| [0003](docs/adr/0003-no-postings-on-authorisation-or-void.md) | No ledger postings on authorisation or void |
+| [0004](docs/adr/0004-unknown-outcomes-inquire-before-retry.md) | Unknown outcomes: inquire before any retry, with fixed request IDs |
+| [0005](docs/adr/0005-refund-reservation-with-pessimistic-locking.md) | Refund reservation with pessimistic locking |
+| [0006](docs/adr/0006-transactional-outbox-at-least-once.md) | Transactional outbox; at-least-once delivery with idempotent consumers |
+| 0007 | Reconciliation never mutates the ledger; UTC business days (planned with M3) |
+| [0008](docs/adr/0008-virtual-threads-for-psp-calls.md) | Virtual threads for PSP calls |
 
 ## Performance
 

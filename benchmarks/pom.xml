@@ -14,6 +14,11 @@
     <name>LedgerPay :: Benchmarks</name>
     <description>JMH benchmarks (design §14.1); compiled in CI, run on demand</description>
 
+    <properties>
+        <!-- Benchmark code, not product code: no tests, so no coverage gate. -->
+        <jacoco.skip>true</jacoco.skip>
+    </properties>
+
     <dependencies>
         <dependency>
             <groupId>com.ledgerpay</groupId>

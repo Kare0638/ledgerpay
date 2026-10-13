@@ -16,6 +16,42 @@ jobs:
           java-version: "21"
           cache: maven
 
-      # Unit tests, Testcontainers integration tests and the Spotless format check.
+      # Unit tests, Testcontainers integration tests (PostgreSQL, Kafka), acceptance tests against
+      # the real mock-psp, the Spotless format check and the JaCoCo gate: a module below 80 % line
+      # coverage fails the build (design §12).
       - name: Build and verify
         run: ./mvnw -B verify
+
+      - name: Coverage summary
+        if: always()
+        run: |
+          {
+            echo "| Module | Line coverage | Branch coverage |"
+            echo "|---|---:|---:|"
+            for csv in */target/site/jacoco/jacoco.csv; do
+              awk -F, -v module="${csv%%/*}" 'NR > 1 { lm += $8; lc += $9; bm += $6; bc += $7 }
+                END { printf "| %s | %.1f %% | %.1f %% |\n", module, 100 * lc / (lm + lc), 100 * bc / (bm + bc) }' "$csv"
+            done
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: coverage-reports
+          path: "*/target/site/jacoco"
+          retention-days: 14
+
+  # A fresh checkout runs the happy path with one command (#16): the Compose stack from the
+  # Dockerfile, then scripts/demo.sh's checks of the ledger, balance, Kafka events and webhooks.
+  demo:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Run the demo
+        run: scripts/demo.sh
+
+      - name: Service logs
+        if: failure()
+        run: docker compose -f infra/docker-compose.yml logs --no-color --tail 200

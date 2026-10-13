@@ -113,5 +113,30 @@ services:
         condition: service_healthy
     healthcheck: *service-healthcheck
 
+  # A merchant's webhook endpoint for the local stack (scripts/demo.sh): prints each signed
+  # delivery and answers 204. Reachable from notification-service as http://merchant-webhook-sink:8080.
+  merchant-webhook-sink:
+    <<: *service
+    image: python:3.13-alpine
+    command:
+      - python
+      - -u
+      - -c
+      - |
+        from http.server import BaseHTTPRequestHandler, HTTPServer
+
+        class Sink(BaseHTTPRequestHandler):
+            def do_POST(self):
+                body = self.rfile.read(int(self.headers.get("Content-Length", 0))).decode()
+                print(self.headers.get("X-LedgerPay-Event-Type"),
+                      "signature=" + str(self.headers.get("X-LedgerPay-Signature")), body, flush=True)
+                self.send_response(204)
+                self.end_headers()
+
+            def log_message(self, *args):
+                pass
+
+        HTTPServer(("", 8080), Sink).serve_forever()
+
 volumes:
   postgres-data:
