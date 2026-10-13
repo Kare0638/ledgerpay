@@ -397,14 +397,34 @@ CREATE TABLE recon_items (
 );
 ```
 
-notification-service database:
+notification-service database (`notification`):
 
 ```sql
+CREATE TABLE merchant_endpoints (
+    merchant_id     TEXT PRIMARY KEY,
+    webhook_url     TEXT        NOT NULL,
+    signing_secret  TEXT        NOT NULL,   -- per merchant; shown once at registration
+    updated_at      TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
 CREATE TABLE processed_events (
     event_id      UUID PRIMARY KEY,
     processed_at  TIMESTAMPTZ NOT NULL DEFAULT now()
 );
+
+CREATE TABLE webhook_deliveries (
+    event_id         UUID PRIMARY KEY REFERENCES processed_events(event_id),
+    merchant_id      TEXT        NOT NULL,
+    event_type       TEXT        NOT NULL,
+    payment_id       UUID        NOT NULL,
+    status           TEXT        NOT NULL,   -- DELIVERED / NO_ENDPOINT
+    webhook_url      TEXT,
+    response_status  INT,
+    delivered_at     TIMESTAMPTZ NOT NULL DEFAULT now()
+);
 ```
+
+`merchants.webhook_url` in payment-service's database is not used: notification-service owns where and how webhooks are sent (section 10).
 
 ---
 
@@ -642,10 +662,13 @@ FOR UPDATE SKIP LOCKED;
 - See [ADR 0006](adr/0006-transactional-outbox-at-least-once.md).
 
 **notification-service**
-- Records `processed_events` and the delivery in one transaction; a duplicate `event_id` is skipped.
-- Sends HMAC-signed webhooks to the merchant's `webhook_url` — the same scheme as inbound PSP webhooks, in the opposite direction.
-- Three retries with exponential backoff, then `payments.events.dlq` (Spring Kafka `DefaultErrorHandler` + `DeadLetterPublishingRecoverer`). A production system would use a delivery table with scheduled retries, because merchant endpoints can be down for hours.
-- Offsets are committed after successful processing.
+- Owns merchant webhook endpoints: `PUT /ops/merchants/{merchantId}/webhook-endpoint` (ops key) sets the URL and generates a **per-merchant** signing secret, returned once; registering again rotates it. A shared secret would let one merchant forge another's webhooks, and a secret cannot travel in an event, so the endpoint lives with the service that signs. The secret is stored in the clear because signing needs it; production would keep it in a secrets manager.
+- For each event: skip it if its `eventId` is in `processed_events`; with no endpoint for the merchant, record `NO_ENDPOINT`; otherwise POST the envelope, then record `processed_events` and the delivery in one transaction.
+- Sends HMAC-signed webhooks — the same scheme as inbound PSP webhooks, in the opposite direction: `X-LedgerPay-Signature` = `HMAC-SHA256(secret, timestamp + "." + body)`, with `X-LedgerPay-Timestamp`, `X-LedgerPay-Event-Id` and `X-LedgerPay-Event-Type`. A crash between the POST and the record sends the webhook again, so merchants de-duplicate on the event ID.
+- Three retries with exponential backoff (1, 2, 4 s), then `payments.events.dlq` (Spring Kafka `DefaultErrorHandler` + `DeadLetterPublishingRecoverer`), with the original key and value and the exception in headers. A malformed event is dead-lettered at once. The retries block the partition; a production system would use a delivery table with scheduled retries, because merchant endpoints can be down for hours.
+- notification-service's own database being unavailable (connection refused, timeouts, no transaction) is not the event's fault and is never dead-lettered: those failures are retried every `max-interval` (10 s) until the database is back, holding the partition, which could not progress without it anyway. Otherwise a short outage would dead-letter every event consumed during it, and nothing replays the dead-letter topic.
+- `PUT /ops/merchants/{id}/webhook-endpoint` accepts only an `http(s)` URL that parses as a URI with a host; anything else is 400.
+- Offsets are committed per record (`ack-mode: record`) once it is handled: delivered, skipped or dead-lettered.
 
 End-to-end exactly-once is not realistic for business side effects; the design is **at-least-once delivery + idempotent consumers**, i.e. effectively-once. And **ledger correctness does not depend on Kafka**: if Kafka is down, balances stay correct and only notifications are delayed.
 

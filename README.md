@@ -2,7 +2,7 @@
 
 A payment, double-entry ledger and settlement reconciliation service in Java 21 and Spring Boot, built around the failure modes that matter in payments: client retries, PSP timeouts with unknown outcomes, lost or duplicated webhooks, concurrent refunds, and books that disagree with the PSP's settlement report.
 
-> **Status (October 2026):** the core payment flow with partial refunds, the ledger, failure handling around the PSP and outbox publishing to Kafka are built and tested; merchant notifications and reconciliation are next. Progress is tracked on the [milestones](https://github.com/Kare0638/ledgerpay/milestones).
+> **Status (October 2026):** the core payment flow with partial refunds, the ledger, failure handling around the PSP and the event pipeline to signed merchant webhooks are built and tested; reconciliation is next. Progress is tracked on the [milestones](https://github.com/Kare0638/ledgerpay/milestones).
 
 ## Built and tested
 
@@ -14,6 +14,7 @@ A payment, double-entry ledger and settlement reconciliation service in Java 21 
 - **Double-entry ledger with database-enforced invariants**: a deferred balance constraint, append-only journals and exactly one journal per settled operation ([ADR 0001](docs/adr/0001-money-as-integer-minor-units.md), [ADR 0003](docs/adr/0003-no-postings-on-authorisation-or-void.md)). Property-based tests with jqwik cover fees and posting rules.
 - **Signed webhooks through a persisted inbox**: HMAC with a timestamp window. Events are de-duplicated by event ID and by outcome. Stale events are ignored. Unknown, mismatched or contradicting events are quarantined with the reason, and conflicting bodies are kept for investigation (AT-07, AT-08, AT-09).
 - **Transactional outbox to Kafka**: every event is written in the transaction that makes the change, so a rollback leaves none. A relay publishes to `payments.events` keyed by payment ID (`acks=all`, idempotent producer) and marks events only after the broker acknowledges: at-least-once, with the outbox ID as `eventId` for consumers to de-duplicate. A payment's next event waits until the previous one is published, so concurrent relays cannot reorder it. With Kafka down, payments carry on and events wait in the table ([ADR 0006](docs/adr/0006-transactional-outbox-at-least-once.md)).
+- **Signed merchant webhooks from Kafka**: notification-service consumes `payments.events`, skips event IDs it has processed, and POSTs the event to the merchant's endpoint, signed with a per-merchant secret it generates at registration. A failing merchant is retried three times with exponential backoff, then the event goes to `payments.events.dlq`; a malformed event goes there at once ([ADR 0006](docs/adr/0006-transactional-outbox-at-least-once.md)).
 - **A mock PSP with fault injection**: decline, timeout after commit, dropped, duplicated, out-of-order and delayed webhooks, used by acceptance tests that run payment-service against the real mock-psp process and PostgreSQL.
 - **Performance analysis**: a JMH benchmark of PSP calls on virtual threads against platform thread pools, and JFR recordings under k6 load ([below](#performance)).
 
@@ -23,8 +24,7 @@ Acceptance tests from the [design's list](docs/design.md): AT-01 to AT-14 pass, 
 
 | Milestone | What | Issues |
 |---|---|---|
-| M2: failure handling and events | notification-service: idempotent consumer, signed merchant webhooks, dead-letter topic | #15 |
-| | CI quality gate and a README you can run end to end | #16 |
+| M2: failure handling and events | CI quality gate and a README you can run end to end | #16 |
 | M3: reconciliation and observability | Settlement CSV import, matching on a consistent snapshot with classified breaks, ledger integrity check, demo data | #17–#21 |
 | | Metrics, Grafana dashboard, alert rules, structured logs | #22 |
 | M4: performance and cloud | Published k6 results, Terraform for ECS Fargate and RDS | #23, #24 |
@@ -39,7 +39,8 @@ Merchant ──▶ payment-service ──▶ PostgreSQL (source of truth for mon
                  ▼    │
                mock-psp (own state, fault injection)
 
-payment-service ──outbox relay──▶ Kafka payments.events ──▶ notification-service (planned) ──▶ signed merchant webhooks
+payment-service ──outbox relay──▶ Kafka payments.events ──▶ notification-service ──▶ signed merchant webhooks
+                                                                   └─ after 3 retries ──▶ payments.events.dlq
 ```
 
 See [docs/design.md](docs/design.md) for the full design: state machine, posting rules, schema, API, recovery paths, reconciliation rules and the acceptance test list.
@@ -65,9 +66,9 @@ docker compose -f infra/docker-compose.yml up --build -d
 |---|---|---|
 | payment-service | 8080 | http://localhost:8080/actuator/health |
 | mock-psp | 8081 | http://localhost:8081/actuator/health |
-| notification-service | 8082 | http://localhost:8082/actuator/health (a skeleton until #15) |
-| PostgreSQL 16 | 5432 | databases `ledgerpay` and `mockpsp` |
-| Kafka (KRaft) | 9092 | topic `payments.events`, written by the outbox relay |
+| notification-service | 8082 | http://localhost:8082/actuator/health; register a merchant endpoint with `PUT /ops/merchants/{id}/webhook-endpoint` and the local ops key `dev-only-ops-key` |
+| PostgreSQL 16 | 5432 | databases `ledgerpay`, `mockpsp` and `notification` (created on a fresh volume; with an older one, `CREATE DATABASE notification` or `docker compose down -v`) |
+| Kafka (KRaft) | 9092 | `payments.events` (outbox relay → notification-service), `payments.events.dlq` |
 
 ## Performance
 

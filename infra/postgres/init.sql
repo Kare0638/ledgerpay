@@ -2,3 +2,4 @@
 -- settlement reports come from its own records, never from our ledger.
 CREATE DATABASE ledgerpay;
 CREATE DATABASE mockpsp;
+CREATE DATABASE notification;
