@@ -6,6 +6,8 @@ import com.ledgerpay.notification.PostgresTestcontainersConfiguration;
 import java.util.Map;
 import java.util.UUID;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.boot.test.web.client.TestRestTemplate;
@@ -86,5 +88,15 @@ class EndpointControllerTest {
   void refusesAUrlThatIsNotHttp() {
     assertThat(register("m_" + UUID.randomUUID(), "ftp://x.example", OPS_KEY).getStatusCode())
         .isEqualTo(HttpStatus.BAD_REQUEST);
+  }
+
+  /** They match {@code https?://\S+} but are no usable URL: a 400, not a 500. */
+  @ParameterizedTest
+  @ValueSource(strings = {"http://exa^mple.com", "http://a|b.example", "http://:80/hooks"})
+  void refusesAUrlThatIsNotAValidUriWith400(String url) {
+    String merchant = "m_" + UUID.randomUUID();
+
+    assertThat(register(merchant, url, OPS_KEY).getStatusCode()).isEqualTo(HttpStatus.BAD_REQUEST);
+    assertThat(endpoints.find(merchant)).isEmpty();
   }
 }

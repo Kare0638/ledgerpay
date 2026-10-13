@@ -12,6 +12,7 @@ import org.springframework.kafka.core.KafkaTemplate;
 import org.springframework.kafka.listener.DeadLetterPublishingRecoverer;
 import org.springframework.kafka.listener.DefaultErrorHandler;
 import org.springframework.kafka.support.ExponentialBackOffWithMaxRetries;
+import org.springframework.util.backoff.FixedBackOff;
 
 @Configuration(proxyBeanMethods = false)
 class KafkaConfiguration {
@@ -37,6 +38,11 @@ class KafkaConfiguration {
    * event goes there at once. The retries block the partition, which is acceptable for three
    * retries of seconds; a production system would keep a delivery table with scheduled retries,
    * because merchant endpoints can be down for hours.
+   *
+   * <p>Our own database being unavailable is not the event's fault: three retries over seven
+   * seconds would dead-letter every event consumed during a short outage, and nothing replays the
+   * dead-letter topic. Those failures are retried every {@code max-interval} until the database is
+   * back, holding the partition, which could not make progress without the database anyway.
    */
   @Bean
   DefaultErrorHandler errorHandler(
@@ -63,6 +69,11 @@ class KafkaConfiguration {
     backOff.setMaxInterval(retry.maxInterval().toMillis());
     var handler = new DefaultErrorHandler(recoverer, backOff);
     handler.addNotRetryableExceptions(MalformedEventException.class);
+    var untilTheDatabaseIsBack =
+        new FixedBackOff(retry.maxInterval().toMillis(), FixedBackOff.UNLIMITED_ATTEMPTS);
+    handler.setBackOffFunction(
+        (record, exception) ->
+            DatabaseFailures.isTemporary(exception) ? untilTheDatabaseIsBack : null);
     return handler;
   }
 }
