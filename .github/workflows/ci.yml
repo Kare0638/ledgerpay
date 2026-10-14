@@ -24,13 +24,19 @@ jobs:
 
       - name: Coverage summary
         if: always()
+        # Also after a failed verify, when some modules have no report yet: nullglob skips them.
         run: |
+          shopt -s nullglob
           {
             echo "| Module | Line coverage | Branch coverage |"
             echo "|---|---:|---:|"
             for csv in */target/site/jacoco/jacoco.csv; do
-              awk -F, -v module="${csv%%/*}" 'NR > 1 { lm += $8; lc += $9; bm += $6; bc += $7 }
-                END { printf "| %s | %.1f %% | %.1f %% |\n", module, 100 * lc / (lm + lc), 100 * bc / (bm + bc) }' "$csv"
+              awk -F, -v module="${csv%%/*}" '
+                function pct(covered, missed) {
+                  return covered + missed == 0 ? "n/a" : sprintf("%.1f %%", 100 * covered / (covered + missed))
+                }
+                NR > 1 { lm += $8; lc += $9; bm += $6; bc += $7 }
+                END { printf "| %s | %s | %s |\n", module, pct(lc, lm), pct(bc, bm) }' "$csv"
             done
           } >> "$GITHUB_STEP_SUMMARY"
 
@@ -44,6 +50,7 @@ jobs:
   # A fresh checkout runs the happy path with one command (#16): the Compose stack from the
   # Dockerfile, then scripts/demo.sh's checks of the ledger, balance, Kafka events and webhooks.
   demo:
+    needs: build
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:

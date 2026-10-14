@@ -53,7 +53,7 @@ Planned: Micrometer / Prometheus / Grafana · Terraform · AWS (ECS Fargate, RDS
 
 ## Quick start
 
-Prerequisites: Docker with Compose v2, bash and curl. JDK 21 only to run the tests outside Docker.
+Prerequisites: Docker with Compose v2, bash 4.4 or later (macOS ships 3.2: `brew install bash`) and curl 7.76 or later. JDK 21 only to run the tests outside Docker.
 
 ```bash
 git clone https://github.com/Kare0638/ledgerpay.git && cd ledgerpay

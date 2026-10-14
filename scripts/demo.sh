@@ -6,8 +6,16 @@
 #
 # It seeds merchant m_demo with a new API key and registers its webhook endpoint, then pays £100,
 # captures it, refunds £30 and checks each money effect: the ledger, the balance, the Kafka event
-# and the signed webhook the merchant received. Needs Docker with Compose v2, curl and bash.
+# and the signed webhook the merchant received. Needs Docker with Compose v2, curl 7.76+ and
+# bash 4.4+ (macOS ships 3.2: brew install bash).
 set -euo pipefail
+if (( BASH_VERSINFO[0] * 100 + BASH_VERSINFO[1] < 404 )); then
+  echo "scripts/demo.sh needs bash 4.4 or later, not $BASH_VERSION (macOS: brew install bash)" >&2
+  exit 1
+fi
+# A failure inside $(...) stops the demo too: without this, $(balance) would return an empty
+# string after a failed request, and the checks would go on with it.
+shopt -s inherit_errexit
 
 cd "$(dirname "$0")/.."
 COMPOSE=(docker compose -f infra/docker-compose.yml)
@@ -18,8 +26,13 @@ MERCHANT=m_demo
 
 step() { printf '\n\033[1m== %s\033[0m\n' "$*"; }
 fail() { printf '\033[31mFAILED: %s\033[0m\n' "$*" >&2; exit 1; }
-# Reads one string or number field from a flat JSON object, so the demo needs no jq.
-field() { sed -n "s/.*\"$1\":\"\{0,1\}\([^,\"}]*\)\"\{0,1\}[,}].*/\1/p" <<< "$2"; }
+# Reads the first string or number field with this name from a JSON object, so the demo needs no
+# jq. Empty when there is none; callers check.
+field() {
+  { grep -o "\"$1\":\"\{0,1\}[^,\"}]*" <<< "$2" || true; } | head -n 1 | sed 's/^"[^"]*":"\{0,1\}//'
+}
+# 32 random hex digits, for the API key and the order number.
+random_hex() { head -c 16 /dev/urandom | od -An -tx1 | tr -d ' \n'; }
 # curl that, on an HTTP error, stops the demo with the response body (a Problem) rather than a bare code.
 http() {
   local out
@@ -30,12 +43,17 @@ sql() { "${COMPOSE[@]}" exec -T postgres psql -U ledgerpay -d "$1" -v ON_ERROR_S
 sql_value() { "${COMPOSE[@]}" exec -T postgres psql -U ledgerpay -d "$1" -At -v ON_ERROR_STOP=1 -c "$2"; }
 
 # Polls a GET until its status field is the expected one, as a client waiting for a webhook would.
+# A different final status (a fault rule left from an earlier run, say) fails at once.
 wait_for_status() {
   local url=$1 expected=$2 body status
   for _ in $(seq 1 60); do
     body=$(http "$url" -H "Authorization: Bearer $KEY")
     status=$(field status "$body")
     [[ $status == "$expected" ]] && { echo "  $status"; return; }
+    case $status in
+      DECLINED | VOIDED | FAILED)
+        fail "$url is $status, expected $expected. Clear mock-psp's fault rules with: curl -X DELETE localhost:8081/_admin/faults" ;;
+    esac
     sleep 1
   done
   fail "$url is $status after 60 s, expected $expected"
@@ -53,10 +71,13 @@ step "Building and starting the stack (the first build downloads Maven dependenc
 }
 
 step "Seeding merchant $MERCHANT with a new API key (only its SHA-256 is stored)"
-KEY="mk_demo_$(head -c 16 /dev/urandom | od -An -tx1 | tr -d ' \n')"
-HASH=$(printf '%s' "$KEY" | sha256sum | cut -d' ' -f1)
-sql ledgerpay "INSERT INTO merchants (id, api_key_hash) VALUES ('$MERCHANT', '$HASH')
-               ON CONFLICT (id) DO UPDATE SET api_key_hash = EXCLUDED.api_key_hash" > /dev/null
+KEY="mk_demo_$(random_hex)"
+# Hashed by PostgreSQL, so the host needs no sha256sum. The fee is reset too: the balance check
+# below assumes the default 1 %.
+sql ledgerpay "INSERT INTO merchants (id, api_key_hash, fee_bps)
+               VALUES ('$MERCHANT', encode(sha256(convert_to('$KEY', 'UTF8')), 'hex'), 100)
+               ON CONFLICT (id) DO UPDATE SET api_key_hash = EXCLUDED.api_key_hash,
+                                              fee_bps = EXCLUDED.fee_bps" > /dev/null
 echo "  API key: $KEY"
 
 step "Registering $MERCHANT's webhook endpoint with notification-service"
@@ -68,11 +89,13 @@ echo "  signing secret: $(field signingSecret "$ENDPOINT")"
 balance() {
   local body
   body=$(http "$API/v1/accounts/merchant_payable:$MERCHANT/balance" -H "Authorization: Bearer $KEY")
-  field balanceMinor "$body"
+  body=$(field balanceMinor "$body")
+  [[ $body =~ ^-?[0-9]+$ ]] || fail "no balanceMinor in the balance response"
+  printf '%s' "$body"
 }
 BALANCE_BEFORE=$(balance)
 
-REF="order-$(date +%s)"
+REF="order-$(random_hex)"
 step "Creating a £100.00 payment ($REF)"
 CREATED=$(http -X POST "$API/v1/payments" \
   -H "Authorization: Bearer $KEY" -H "Idempotency-Key: $REF" -H 'Content-Type: application/json' \
@@ -135,7 +158,7 @@ done
 (( DELIVERED == EVENTS )) || fail "$DELIVERED of $EVENTS webhooks delivered after 30 s"
 sql notification "SELECT event_type, status, response_status FROM webhook_deliveries
                   WHERE payment_id = '$PAYMENT' ORDER BY delivered_at"
-"${COMPOSE[@]}" logs --no-log-prefix merchant-webhook-sink | grep "$PAYMENT" | cut -c1-160
+"${COMPOSE[@]}" logs --no-log-prefix merchant-webhook-sink | { grep "$PAYMENT" || true; } | cut -c1-160
 
 step "Done"
 cat <<EOF
