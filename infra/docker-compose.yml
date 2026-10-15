@@ -63,6 +63,8 @@ services:
       PSP_BASE_URL: http://mock-psp:8080
       PSP_WEBHOOK_SECRET: dev-only-webhook-secret
       KAFKA_BOOTSTRAP_SERVERS: kafka:29092
+      # SHA-256 of "dev-only-ops-key": settlement report uploads and inquiries under /ops locally.
+      OPS_API_KEY_HASH: c5f26d1b51ffff2acca999b6bccfe9fde4b0d5ddc14505c79398837866bc572d
     ports:
       - "8080:8080"
     depends_on:

@@ -347,7 +347,8 @@ CREATE INDEX idx_outbox_unpublished ON outbox_events(seq) WHERE published_at IS 
 CREATE INDEX idx_outbox_unpublished_aggregate ON outbox_events(aggregate_id, seq)
     WHERE published_at IS NULL;
 
--- V8__reconciliation.sql (V4 to V7 went to #10, #11 and #14)
+-- V8__settlement_reports.sql (#17; V4 to V7 went to #10, #11 and #14). Both tables are
+-- append-only, by the same trigger as the journals (ADR 0007).
 CREATE TABLE settlement_reports (
     id             UUID PRIMARY KEY,
     psp            TEXT        NOT NULL,
@@ -355,13 +356,15 @@ CREATE TABLE settlement_reports (
     file_sha256    TEXT        NOT NULL,
     version        INT         NOT NULL,
     status         TEXT        NOT NULL,   -- VALID / INVALID
-    row_count      INT         NOT NULL,
-    errors         JSONB,
+    row_count      INT         NOT NULL,   -- data rows in the file
+    error_count    INT         NOT NULL DEFAULT 0,
+    errors         JSONB,                  -- [{line, column, message}], the first 1,000
     uploaded_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
     UNIQUE (psp, business_date, file_sha256),
     UNIQUE (psp, business_date, version)
 );
 
+-- Rows of VALID reports only.
 CREATE TABLE settlement_rows (
     report_id       UUID    NOT NULL REFERENCES settlement_reports(id),
     line_no         INT     NOT NULL,
@@ -375,6 +378,7 @@ CREATE TABLE settlement_rows (
     PRIMARY KEY (report_id, line_no)
 );
 
+-- V9__reconciliation.sql (#18)
 CREATE TABLE recon_runs (
     id             UUID PRIMARY KEY,
     report_id      UUID        NOT NULL REFERENCES settlement_reports(id),
@@ -440,7 +444,7 @@ A merchant can read one account's balance: its own `merchant_payable:{merchantId
 
 Every response carries a trace ID in the `X-Trace-Id` header, in the body of 202 responses and in every Problem Details body. It always identifies the current request: stored idempotent responses have no trace ID, and a replay gets its own. Until distributed tracing arrives (section 13), it is generated per request by a servlet filter and put in the logging MDC.
 
-Every write requires an `Idempotency-Key` header.
+Every merchant write requires an `Idempotency-Key` header. A settlement report upload needs none: the file's SHA-256 makes it idempotent.
 
 | Method | Path | Purpose | Success | Typical errors |
 |---|---|---|---|---|
@@ -452,11 +456,14 @@ Every write requires an `Idempotency-Key` header.
 | GET | `/v1/refunds/{id}` | Refund details | 200 | 404 |
 | GET | `/v1/accounts/{id}/balance` | Balance derived from postings | 200 | 404 |
 | POST | `/webhooks/psp` | Inbound PSP webhook (HMAC, not API key) | 200 | 401 / 400 / 503 |
-| POST | `/ops/settlement-reports` | Upload a PSP settlement CSV | 201, or 200 for an identical file | 400 / 413 |
+| POST | `/ops/settlement-reports?businessDate=&psp=` | Upload a PSP settlement CSV (`text/csv`) | 201, or 200 for an identical file | 400 `INVALID_CSV` / 413 / 415 |
+| GET | `/ops/settlement-reports/{id}`, `/ops/settlement-reports?businessDate=&psp=` | One version with its errors; every version of a day | 200 | 404 |
 | POST | `/ops/recon-runs` | Reconcile a specific report version | 202 | 404 |
 | GET | `/ops/recon-runs/{id}`, `/ops/recon-runs/{id}/items` | Run summary and item-level breaks | 200 | 404 |
 | POST | `/ops/psp-operations/{id}/inquiry` | Trigger a PSP status inquiry | 202 | 404 |
 | GET | `/actuator/health`, `/actuator/prometheus` | Health and metrics | 200 | |
+
+A settlement upload names the business day; `psp` defaults to the configured provider (`mock-psp`). The response is the stored version: `reportId`, `psp`, `businessDate`, `version`, `status`, `rowCount`, `errorCount`, `errors`, `fileSha256`, `uploadedAt`. An INVALID file is still kept as a version (section 11.1), so the 400 `INVALID_CSV` problem carries its `reportId`, `version`, `rowCount`, `errorCount` and `errors`, each `{line, column, message}`. Uploading the same INVALID file again returns the same 400.
 
 A refund is requested with `{ "merchantReference": "refund-1", "amountMinor": 3000, "reason": "returned" }`, in the payment's currency. The 202 response carries `refundId`, `paymentId`, `status` (PENDING) and `statusUrl` (`/v1/refunds/{id}`).
 
@@ -594,7 +601,7 @@ Before anything changes, the event must match the operation: merchant (from the 
 
 ### 9.4 mock-psp
 
-A separate Spring Boot service with its own schema. Endpoints: submit an operation (idempotent on `psp_request_id`; same ID with different parameters is rejected), inquire by request ID, export a daily settlement CSV.
+A separate Spring Boot service with its own schema. Endpoints: submit an operation (idempotent on `psp_request_id`; same ID with different parameters is rejected), inquire by request ID, export a daily settlement CSV (`GET /reports/settlement?date=YYYY-MM-DD`, section 11.1).
 
 The wire format is snake_case JSON; errors are Problem Details with a `code`.
 
@@ -679,10 +686,11 @@ End-to-end exactly-once is not realistic for business side effects; the design i
 ### 11.1 Settlement reports
 - mock-psp exports one CSV per business day containing **successful captures and refunds only** (authorisations and voids move no money).
 - Business day is UTC: `[D 00:00:00Z, D+1 00:00:00Z)`. Real UK operations often cut over on Europe/London time, where clock-change days are 23 or 25 hours long; UTC avoids that and the choice is recorded in an ADR.
-- Columns: `psp_reference, psp_request_id, txn_type, merchant_id, amount_minor, currency, succeeded_at`.
-- The whole file is validated on import. Missing columns, invalid amounts or timestamps, rows outside the business day, or more than 10 MB / 100,000 rows → the report is `INVALID` with line-level errors, and **no reconciliation result is produced**. Rows are never silently dropped.
-- An identical file (SHA-256) returns the existing report. A corrected file becomes a new version; old versions are kept; each run is bound to one version.
-- CSV exports escape cells beginning with `= + - @` to prevent spreadsheet formula injection.
+- Columns: `psp_reference, psp_request_id, txn_type, merchant_id, amount_minor, currency, succeeded_at`. mock-psp writes them in that order with CRLF line ends (RFC 4180); the import accepts them in any order. `succeeded_at` is ISO-8601 UTC ending in `Z`; amounts are positive minor units.
+- The whole file is validated on import (`SettlementCsvParser`). Strict UTF-8; exactly the seven columns; per row, `txn_type` CAPTURE or REFUND, a positive whole-number amount, an ISO 4217 currency, a `Z` timestamp inside the business day, and references and merchant without surrounding spaces or control characters. Blank lines and wrong field counts are errors, not skipped rows. Any error, or more than 100,000 rows, makes the report `INVALID` with line-level errors and no rows, and **no reconciliation result is produced** from it. Rows are never silently dropped.
+- More than 10 MB is refused with 413 before anything is stored.
+- An identical file (SHA-256) returns the existing report. Any other file becomes the day's next version, INVALID ones included, under an advisory lock on the PSP and day. Old versions are kept unchanged; each run is bound to one version (ADR 0007).
+- CSV written for people escapes cells beginning with `= + - @`, a tab or a carriage return with a leading `'`, against spreadsheet formula injection. The import undoes exactly that escape (`Csv.unescapeFormula`).
 
 ### 11.2 Matching and classification
 
@@ -901,7 +909,7 @@ ledgerpay/
 | 0004 | Unknown outcomes: inquire before any retry, fixed request IDs ([accepted](adr/0004-unknown-outcomes-inquire-before-retry.md)) |
 | 0005 | Refund reservation with pessimistic locking ([accepted](adr/0005-refund-reservation-with-pessimistic-locking.md)) |
 | 0006 | Transactional outbox; at-least-once delivery with idempotent consumers ([accepted](adr/0006-transactional-outbox-at-least-once.md)) |
-| 0007 | Reconciliation never mutates the ledger; UTC business days |
+| 0007 | Reconciliation never mutates the ledger; UTC business days ([accepted](adr/0007-reconciliation-never-mutates-the-ledger-utc-business-days.md)) |
 | 0008 | Executor for PSP calls: virtual threads vs a platform thread pool, based on the JMH results |
 
 Each ADR records context and constraints, the decision, rejected alternatives, trade-offs and the tests that cover it.

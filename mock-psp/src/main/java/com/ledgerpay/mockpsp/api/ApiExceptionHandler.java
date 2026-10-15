@@ -5,8 +5,10 @@ import org.springframework.http.HttpStatus;
 import org.springframework.http.ProblemDetail;
 import org.springframework.http.converter.HttpMessageNotReadableException;
 import org.springframework.web.bind.MethodArgumentNotValidException;
+import org.springframework.web.bind.MissingServletRequestParameterException;
 import org.springframework.web.bind.annotation.ExceptionHandler;
 import org.springframework.web.bind.annotation.RestControllerAdvice;
+import org.springframework.web.method.annotation.MethodArgumentTypeMismatchException;
 
 /** Problem Details with a {@code code}, as payment-service reports its own errors. */
 @RestControllerAdvice
@@ -37,6 +39,19 @@ class ApiExceptionHandler {
   @ExceptionHandler(HttpMessageNotReadableException.class)
   ProblemDetail unreadable(HttpMessageNotReadableException e) {
     return problem(HttpStatus.BAD_REQUEST, "INVALID_REQUEST", "Malformed request body");
+  }
+
+  /** A query parameter missing or of the wrong type, such as a report date that is not a date. */
+  @ExceptionHandler({
+    MissingServletRequestParameterException.class,
+    MethodArgumentTypeMismatchException.class
+  })
+  ProblemDetail badParameter(Exception e) {
+    String detail =
+        e instanceof MethodArgumentTypeMismatchException mismatch
+            ? mismatch.getName() + " is not valid: " + mismatch.getValue()
+            : e.getMessage();
+    return problem(HttpStatus.BAD_REQUEST, "INVALID_REQUEST", detail);
   }
 
   private static ProblemDetail problem(HttpStatus status, String code, String detail) {

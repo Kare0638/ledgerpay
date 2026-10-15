@@ -5,9 +5,9 @@
 #   scripts/demo.sh --fresh    first delete the stack's volumes (an older database included)
 #
 # It seeds merchant m_demo with a new API key and registers its webhook endpoint, then pays £100,
-# captures it, refunds £30 and checks each money effect: the ledger, the balance, the Kafka event
-# and the signed webhook the merchant received. Needs Docker with Compose v2, curl 7.76+ and
-# bash 4.4+ (macOS ships 3.2: brew install bash).
+# captures it, refunds £30 and checks each money effect: the ledger, the balance, the Kafka event,
+# the signed webhook the merchant received and mock-psp's settlement report imported for the day.
+# Needs Docker with Compose v2, curl 7.76+ and bash 4.4+ (macOS ships 3.2: brew install bash).
 set -euo pipefail
 if (( BASH_VERSINFO[0] * 100 + BASH_VERSINFO[1] < 404 )); then
   echo "scripts/demo.sh needs bash 4.4 or later, not $BASH_VERSION (macOS: brew install bash)" >&2
@@ -21,7 +21,7 @@ cd "$(dirname "$0")/.."
 COMPOSE=(docker compose -f infra/docker-compose.yml)
 API=http://localhost:8080
 NOTIFY=http://localhost:8082
-OPS_KEY=dev-only-ops-key   # matches OPS_API_KEY_HASH in infra/docker-compose.yml
+OPS_KEY=dev-only-ops-key   # matches both OPS_API_KEY_HASH in infra/docker-compose.yml
 MERCHANT=m_demo
 
 step() { printf '\n\033[1m== %s\033[0m\n' "$*"; }
@@ -159,6 +159,36 @@ done
 sql notification "SELECT event_type, status, response_status FROM webhook_deliveries
                   WHERE payment_id = '$PAYMENT' ORDER BY delivered_at"
 "${COMPOSE[@]}" logs --no-log-prefix merchant-webhook-sink | { grep "$PAYMENT" || true; } | cut -c1-160
+
+step "Settlement: mock-psp's report for the day imports with this payment's capture and refund"
+psp_reference() {
+  sql_value ledgerpay "SELECT psp_reference FROM psp_operations
+                       WHERE payment_id = '$PAYMENT' AND type = '$1'"
+}
+success_day() {
+  sql_value mockpsp "SELECT to_char(succeeded_at AT TIME ZONE 'UTC', 'YYYY-MM-DD')
+                     FROM operations WHERE psp_reference = '$1'"
+}
+CAPTURE_REF=$(psp_reference CAPTURE)
+REFUND_REF=$(psp_reference REFUND)
+DAY=$(success_day "$CAPTURE_REF")
+# A file, not $(...): the report's CRLF line ends must reach the import byte for byte.
+REPORT_FILE=$(mktemp)
+trap 'rm -f "$REPORT_FILE"' EXIT
+http -o "$REPORT_FILE" "http://localhost:8081/reports/settlement?date=$DAY"
+REPORT=$(http -X POST "$API/ops/settlement-reports?businessDate=$DAY" \
+  -H "Authorization: Bearer $OPS_KEY" -H 'Content-Type: text/csv' --data-binary "@$REPORT_FILE")
+echo "  $REPORT"
+[[ $(field status "$REPORT") == VALID ]] || fail "the report should be VALID"
+REPORT_ID=$(field reportId "$REPORT")
+# Both are in the day's report unless the refund succeeded after midnight UTC.
+EXPECTED_ROWS=$([[ $(success_day "$REFUND_REF") == "$DAY" ]] && echo 2 || echo 1)
+sql ledgerpay "SELECT line_no, psp_reference, txn_type, amount_minor, succeeded_at
+               FROM settlement_rows WHERE report_id = '$REPORT_ID'
+               AND psp_reference IN ('$CAPTURE_REF', '$REFUND_REF') ORDER BY line_no"
+FOUND=$(sql_value ledgerpay "SELECT count(*) FROM settlement_rows WHERE report_id = '$REPORT_ID'
+                             AND psp_reference IN ('$CAPTURE_REF', '$REFUND_REF')")
+(( FOUND == EXPECTED_ROWS )) || fail "expected $EXPECTED_ROWS of this payment's rows, found $FOUND"
 
 step "Done"
 cat <<EOF
