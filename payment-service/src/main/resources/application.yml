@@ -38,6 +38,11 @@ logging:
 
 server:
   port: ${SERVER_PORT:8080}
+  tomcat:
+    # A settlement upload over max-file-size is refused before its body is read. Tomcat then drains
+    # the rest so the client can read the 413; past this much it resets the connection instead.
+    # The 2MB default is less than the 10MB limit itself.
+    max-swallow-size: 64MB
 
 ledgerpay:
   psp:

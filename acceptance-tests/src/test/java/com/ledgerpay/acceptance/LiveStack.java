@@ -1,6 +1,7 @@
 package com.ledgerpay.acceptance;
 
 import com.ledgerpay.mockpsp.MockPspFaults;
+import com.ledgerpay.payment.api.ApiKeys;
 import java.io.File;
 import java.io.IOException;
 import java.net.ServerSocket;
@@ -27,6 +28,7 @@ import org.testcontainers.containers.PostgreSQLContainer;
 final class LiveStack {
 
   static final String WEBHOOK_SECRET = "acceptance-webhook-secret";
+  static final String OPS_KEY = "acceptance-ops-key";
 
   static final PostgreSQLContainer<?> POSTGRES = new PostgreSQLContainer<>("postgres:16-alpine");
   static final int PAYMENT_PORT;
@@ -75,6 +77,7 @@ final class LiveStack {
     registry.add("ledgerpay.inbox.processor.enabled", () -> "false");
     registry.add("ledgerpay.outbox.relay.enabled", () -> "false");
     registry.add("spring.kafka.admin.auto-create", () -> "false");
+    registry.add("ledgerpay.ops.api-key-hash", () -> ApiKeys.hash(OPS_KEY));
   }
 
   private static Process startMockPsp() {

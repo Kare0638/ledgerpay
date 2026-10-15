@@ -2,7 +2,7 @@
 
 A payment, double-entry ledger and settlement reconciliation service in Java 21 and Spring Boot, built around the failure modes that matter in payments: client retries, PSP timeouts with unknown outcomes, lost or duplicated webhooks, concurrent refunds, and books that disagree with the PSP's settlement report.
 
-> **Status (October 2026):** the core payment flow with partial refunds, the ledger, failure handling around the PSP and the event pipeline to signed merchant webhooks are built and tested, and the whole flow runs with one command ([quick start](#quick-start)); reconciliation is next. Progress is tracked on the [milestones](https://github.com/Kare0638/ledgerpay/milestones).
+> **Status (October 2026):** the core payment flow with partial refunds, the ledger, failure handling around the PSP and the event pipeline to signed merchant webhooks are built and tested, and the whole flow runs with one command ([quick start](#quick-start)). Reconciliation has started: the PSP's daily settlement report is exported and imported; matching it against the books is next. Progress is tracked on the [milestones](https://github.com/Kare0638/ledgerpay/milestones).
 
 ## Built and tested
 
@@ -15,17 +15,18 @@ A payment, double-entry ledger and settlement reconciliation service in Java 21 
 - **Signed webhooks through a persisted inbox**: HMAC with a timestamp window. Events are de-duplicated by event ID and by outcome. Stale events are ignored. Unknown, mismatched or contradicting events are quarantined with the reason, and conflicting bodies are kept for investigation (AT-07, AT-08, AT-09).
 - **Transactional outbox to Kafka**: every event is written in the transaction that makes the change, so a rollback leaves none. A relay publishes to `payments.events` keyed by payment ID (`acks=all`, idempotent producer) and marks events only after the broker acknowledges: at-least-once, with the outbox ID as `eventId` for consumers to de-duplicate. A payment's next event waits until the previous one is published, so concurrent relays cannot reorder it. With Kafka down, payments carry on and events wait in the table ([ADR 0006](docs/adr/0006-transactional-outbox-at-least-once.md)).
 - **Signed merchant webhooks from Kafka**: notification-service consumes `payments.events`, skips event IDs it has processed, and POSTs the event to the merchant's endpoint, signed with a per-merchant secret it generates at registration. A failing merchant is retried three times with exponential backoff, then the event goes to `payments.events.dlq`; a malformed event goes there at once ([ADR 0006](docs/adr/0006-transactional-outbox-at-least-once.md)).
+- **Settlement reports imported whole or not at all**: mock-psp exports each UTC day's successful captures and refunds from its own records. The import validates every field of every row and stores the file as VALID with all its rows, or as INVALID with each error's line and column and no rows (AT-16). Re-sending a file returns the stored report, a corrected file becomes the next version, and versions are append-only. CSV is escaped against spreadsheet formulas ([ADR 0007](docs/adr/0007-reconciliation-never-mutates-the-ledger-utc-business-days.md)).
 - **A mock PSP with fault injection**: decline, timeout after commit, dropped, duplicated, out-of-order and delayed webhooks, used by acceptance tests that run payment-service against the real mock-psp process and PostgreSQL.
 - **CI quality gate**: every push runs the unit, Testcontainers and acceptance tests, and fails below 80 % line coverage in any module ([below](#running-the-tests)).
 - **Performance analysis**: a JMH benchmark of PSP calls on virtual threads against platform thread pools, and JFR recordings under k6 load ([below](#performance)).
 
-Acceptance tests from the [design's list](docs/design.md): AT-01 to AT-14 pass, 14 of 19.
+Acceptance tests from the [design's list](docs/design.md): AT-01 to AT-14 and AT-16 pass, 15 of 19.
 
 ## Planned
 
 | Milestone | What | Issues |
 |---|---|---|
-| M3: reconciliation and observability | Settlement CSV import, matching on a consistent snapshot with classified breaks, ledger integrity check, demo data | #17–#21 |
+| M3: reconciliation and observability | Matching on a consistent snapshot with classified breaks, ledger integrity check, demo data | #18–#21 |
 | | Metrics, Grafana dashboard, alert rules, structured logs | #22 |
 | M4: performance and cloud | Published k6 results, Terraform for ECS Fargate and RDS | #23, #24 |
 | Optional | An LLM assistant that drafts analyses of reconciliation breaks; SQS/SNS adapter | #26, #25 |
@@ -35,7 +36,7 @@ Acceptance tests from the [design's list](docs/design.md): AT-01 to AT-14 pass, 
 ```
 Merchant ──▶ payment-service ──▶ PostgreSQL (source of truth for money)
                  │    ▲
-      PSP calls  │    │  signed webhooks (settlement CSV: planned)
+      PSP calls  │    │  signed webhooks, daily settlement CSV
                  ▼    │
                mock-psp (own state, fault injection)
 
@@ -65,7 +66,8 @@ scripts/demo.sh
 - the ledger has two balanced journals for the payment;
 - the merchant payable moved by −6900 (−9900 on capture, with the 1 % fee kept, then +3000 on refund);
 - every event reached Kafka through the outbox;
-- every event was delivered to the merchant as a signed webhook.
+- every event was delivered to the merchant as a signed webhook;
+- mock-psp's settlement report for the day imports as VALID and holds the capture and the refund.
 
 It stops with `FAILED` on the first mismatch. The first build downloads Maven dependencies and takes a few minutes. `scripts/demo.sh --fresh` first deletes the stack's volumes, for a database left by an older checkout.
 
@@ -89,6 +91,23 @@ curl -s localhost:8080/v1/accounts/merchant_payable:m_demo/balance -H "Authoriza
 ```
 
 Repeating a request with the same `Idempotency-Key` returns the first response; the same key with a different body is a 422. The full API is in [design §7](docs/design.md).
+
+### Settlement reports
+
+Export a day from mock-psp and import it into payment-service with the local ops key:
+
+```bash
+DAY=$(date -u +%F)
+curl -s "localhost:8081/reports/settlement?date=$DAY" -o settlement.csv
+curl -s -X POST "localhost:8080/ops/settlement-reports?businessDate=$DAY" \
+  -H 'Authorization: Bearer dev-only-ops-key' -H 'Content-Type: text/csv' --data-binary @settlement.csv
+# 201 {"status":"VALID","version":1,"rowCount":…}; the same file again is a 200
+
+sed -i 's/,10000,GBP,/,100.00,GBP,/' settlement.csv   # damage an amount
+curl -s -X POST "localhost:8080/ops/settlement-reports?businessDate=$DAY" \
+  -H 'Authorization: Bearer dev-only-ops-key' -H 'Content-Type: text/csv' --data-binary @settlement.csv
+# 400 INVALID_CSV, kept as version 2 with no rows: "errors":[{"line":2,"column":"amount_minor",…}]
+```
 
 ### Triggering faults
 
@@ -147,7 +166,7 @@ Requires JDK 21 and a running Docker daemon (Testcontainers starts PostgreSQL an
 | [0004](docs/adr/0004-unknown-outcomes-inquire-before-retry.md) | Unknown outcomes: inquire before any retry, with fixed request IDs |
 | [0005](docs/adr/0005-refund-reservation-with-pessimistic-locking.md) | Refund reservation with pessimistic locking |
 | [0006](docs/adr/0006-transactional-outbox-at-least-once.md) | Transactional outbox; at-least-once delivery with idempotent consumers |
-| 0007 | Reconciliation never mutates the ledger; UTC business days (planned with M3) |
+| [0007](docs/adr/0007-reconciliation-never-mutates-the-ledger-utc-business-days.md) | Reconciliation never mutates the ledger; UTC business days; reports kept as versions |
 | [0008](docs/adr/0008-virtual-threads-for-psp-calls.md) | Virtual threads for PSP calls |
 
 ## Performance
