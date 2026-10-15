@@ -285,6 +285,24 @@ class SettlementReportIntegrationTest {
     assertThat(atTheLimit.body().path("code").asText()).isEqualTo("INVALID_CSV");
   }
 
+  /**
+   * Far over the limit, and past the 2 MB Tomcat drains by default after a response: without a
+   * larger max-swallow-size the connection is reset and the client never sees the 413 or its "split
+   * the file".
+   */
+  @Test
+  void aFileFarOverTheLimitStillGetsThe413() throws Exception {
+    byte[] huge = new byte[5 * 1024 * 1024];
+
+    for (boolean chunked : new boolean[] {false, true}) {
+      Response response = upload(huge, "text/csv", OPS_KEY, chunked);
+
+      assertThat(response.status()).as("chunked=" + chunked).isEqualTo(413);
+      assertThat(response.body().path("detail").asText()).contains("split the file");
+    }
+    assertThat(reportCount()).isZero();
+  }
+
   @Test
   void requestsThatAreNotAReportUploadAreRefusedBeforeAnythingIsStored() throws Exception {
     byte[] csv = (HEADER + CAPTURE).getBytes(StandardCharsets.UTF_8);
@@ -322,6 +340,53 @@ class SettlementReportIntegrationTest {
             () -> jdbc.sql("DELETE FROM settlement_reports WHERE id = ?::uuid").param(id).update())
         .isInstanceOf(DataAccessException.class)
         .hasMessageContaining("append-only");
+  }
+
+  void insertRow(String reportId) {
+    jdbc.sql(
+            """
+            INSERT INTO settlement_rows (report_id, line_no, psp_reference, psp_request_id,
+                                         txn_type, merchant_id, amount_minor, currency,
+                                         succeeded_at)
+            VALUES (?::uuid, 99, 'psp_x', 'req_x', 'CAPTURE', 'm_1', 1, 'GBP', now())""")
+        .param(reportId)
+        .update();
+  }
+
+  /**
+   * A stored version is the file as uploaded: a later transaction cannot add rows to it, and an
+   * INVALID report never has any.
+   */
+  @Test
+  void noRowsCanBeAddedToAStoredReport() throws Exception {
+    String valid = upload(HEADER + CAPTURE).body().path("reportId").asText();
+    String invalid = upload(HEADER + BAD_AMOUNT).body().path("reportId").asText();
+
+    for (String id : List.of(valid, invalid)) {
+      assertThatThrownBy(() -> insertRow(id))
+          .as(id)
+          .isInstanceOf(DataAccessException.class)
+          .hasMessageContaining("is closed or INVALID");
+    }
+    assertThat(rowCount(valid)).isEqualTo(1);
+    assertThat(rowCount(invalid)).isZero();
+  }
+
+  /** This test's PSP is not mock-psp, so a leading quote is part of the value it sent. */
+  @Test
+  void aLeadingQuoteIsKeptForAPspThatDoesNotEscapeFormulas() throws Exception {
+    String id =
+        upload(HEADER + "'+A1B2,req_1,CAPTURE,m_1,10000,GBP,2026-10-13T10:00:00Z\r\n")
+            .body()
+            .path("reportId")
+            .asText();
+
+    assertThat(
+            jdbc.sql("SELECT psp_reference FROM settlement_rows WHERE report_id = ?::uuid")
+                .param(id)
+                .query(String.class)
+                .single())
+        .isEqualTo("'+A1B2");
   }
 
   @Test

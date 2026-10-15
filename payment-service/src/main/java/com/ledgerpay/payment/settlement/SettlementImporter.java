@@ -7,6 +7,7 @@ import java.time.LocalDate;
 import java.time.temporal.ChronoUnit;
 import java.util.HexFormat;
 import java.util.Optional;
+import java.util.Set;
 import java.util.UUID;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -30,16 +31,19 @@ public class SettlementImporter {
   private final SettlementCsvParser parser;
   private final TransactionTemplate transactions;
   private final Clock clock;
+  private final Set<String> formulaEscapingPsps;
 
   public SettlementImporter(
       SettlementReports reports,
       SettlementCsvParser parser,
       TransactionTemplate transactions,
-      Clock clock) {
+      Clock clock,
+      SettlementProperties properties) {
     this.reports = reports;
     this.parser = parser;
     this.transactions = transactions;
     this.clock = clock;
+    this.formulaEscapingPsps = properties.formulaEscapingPsps();
   }
 
   public Imported importReport(String psp, LocalDate businessDate, byte[] content) {
@@ -49,7 +53,8 @@ public class SettlementImporter {
       return new Imported(existing.get(), false);
     }
     // Parsed outside the transaction: up to 100,000 rows of work need no lock.
-    SettlementCsvParser.Result parsed = parser.parse(content, businessDate);
+    SettlementCsvParser.Result parsed =
+        parser.parse(content, businessDate, formulaEscapingPsps.contains(psp));
     Imported imported =
         transactions.execute(
             status -> {

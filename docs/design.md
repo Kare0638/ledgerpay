@@ -348,7 +348,8 @@ CREATE INDEX idx_outbox_unpublished_aggregate ON outbox_events(aggregate_id, seq
     WHERE published_at IS NULL;
 
 -- V8__settlement_reports.sql (#17; V4 to V7 went to #10, #11 and #14). Both tables are
--- append-only, by the same trigger as the journals (ADR 0007).
+-- append-only, by the same trigger as the journals, and rows are only inserted with a VALID report
+-- in the transaction that stores it (ADR 0007).
 CREATE TABLE settlement_reports (
     id             UUID PRIMARY KEY,
     psp            TEXT        NOT NULL,
@@ -688,9 +689,9 @@ End-to-end exactly-once is not realistic for business side effects; the design i
 - Business day is UTC: `[D 00:00:00Z, D+1 00:00:00Z)`. Real UK operations often cut over on Europe/London time, where clock-change days are 23 or 25 hours long; UTC avoids that and the choice is recorded in an ADR.
 - Columns: `psp_reference, psp_request_id, txn_type, merchant_id, amount_minor, currency, succeeded_at`. mock-psp writes them in that order with CRLF line ends (RFC 4180); the import accepts them in any order. `succeeded_at` is ISO-8601 UTC ending in `Z`; amounts are positive minor units.
 - The whole file is validated on import (`SettlementCsvParser`). Strict UTF-8; exactly the seven columns; per row, `txn_type` CAPTURE or REFUND, a positive whole-number amount, an ISO 4217 currency, a `Z` timestamp inside the business day, and references and merchant without surrounding spaces or control characters. Blank lines and wrong field counts are errors, not skipped rows. Any error, or more than 100,000 rows, makes the report `INVALID` with line-level errors and no rows, and **no reconciliation result is produced** from it. Rows are never silently dropped.
-- More than 10 MB is refused with 413 before anything is stored.
+- More than 10 MB is refused with 413 before anything is stored; Tomcat drains up to 64 MB of the refused body so the client still reads the 413.
 - An identical file (SHA-256) returns the existing report. Any other file becomes the day's next version, INVALID ones included, under an advisory lock on the PSP and day. Old versions are kept unchanged; each run is bound to one version (ADR 0007).
-- CSV written for people escapes cells beginning with `= + - @`, a tab or a carriage return with a leading `'`, against spreadsheet formula injection. The import undoes exactly that escape (`Csv.unescapeFormula`).
+- CSV written for people escapes cells beginning with `= + - @`, a tab or a carriage return with a leading `'`, against spreadsheet formula injection. The import undoes exactly that escape (`Csv.unescapeFormula`), for the PSPs that apply it (`formula-escaping-psps`, `mock-psp` by default); from any other PSP a leading `'` is data.
 
 ### 11.2 Matching and classification
 

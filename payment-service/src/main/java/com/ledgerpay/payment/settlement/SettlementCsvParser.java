@@ -69,7 +69,11 @@ public final class SettlementCsvParser {
     this.maxErrors = maxErrors;
   }
 
-  public Result parse(byte[] content, LocalDate businessDate) {
+  /**
+   * @param formulasEscaped whether the PSP puts {@code '} before formula-like values (as {@link
+   *     Csv#cell} does), so it is removed again; otherwise every cell is taken as it is
+   */
+  public Result parse(byte[] content, LocalDate businessDate, boolean formulasEscaped) {
     var errors = new Errors(maxErrors);
     String text = decode(content, errors);
     if (text == null) {
@@ -107,7 +111,7 @@ public final class SettlementCsvParser {
     Instant to = businessDate.plusDays(1).atStartOfDay(ZoneOffset.UTC).toInstant();
     List<SettlementRow> rows = new ArrayList<>(rowCount);
     for (Csv.Record record : records.subList(1, records.size())) {
-      SettlementRow row = row(record, index, from, to, businessDate, errors);
+      SettlementRow row = row(record, index, from, to, businessDate, formulasEscaped, errors);
       if (row != null) {
         rows.add(row);
       }
@@ -169,6 +173,7 @@ public final class SettlementCsvParser {
       Instant from,
       Instant to,
       LocalDate businessDate,
+      boolean formulasEscaped,
       Errors errors) {
     int line = record.line();
     if (record.isBlank()) {
@@ -182,7 +187,11 @@ public final class SettlementCsvParser {
     }
     int before = errors.count;
     Map<String, String> cell = new HashMap<>();
-    index.forEach((column, i) -> cell.put(column, Csv.unescapeFormula(record.cells().get(i))));
+    index.forEach(
+        (column, i) -> {
+          String value = record.cells().get(i);
+          cell.put(column, formulasEscaped ? Csv.unescapeFormula(value) : value);
+        });
 
     String reference = text(cell, "psp_reference", line, errors);
     String requestId = text(cell, "psp_request_id", line, errors);

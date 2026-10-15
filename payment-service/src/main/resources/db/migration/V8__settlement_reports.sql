@@ -34,6 +34,29 @@ CREATE TABLE settlement_rows (
 );
 CREATE INDEX idx_settlement_rows_reference ON settlement_rows(psp_reference);
 
+-- A report's rows are written with it, in the transaction that stores it, and only for a VALID
+-- report. Without this a later transaction could add rows to a stored version, so a reconciliation
+-- bound to that version would see rows that were never in the file; or give rows to an INVALID one.
+-- As for postings (V2): xmin is the inserting transaction, so this fails closed inside a SAVEPOINT.
+CREATE FUNCTION settlement_check_report_open() RETURNS trigger
+LANGUAGE plpgsql AS $$
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1 FROM settlement_reports
+        WHERE id = NEW.report_id AND status = 'VALID' AND xmin = pg_current_xact_id()::xid
+    ) THEN
+        RAISE EXCEPTION 'settlement report % is closed or INVALID: rows are only written with a VALID report, in the transaction that stores it',
+            NEW.report_id
+            USING ERRCODE = 'restrict_violation';
+    END IF;
+    RETURN NEW;
+END;
+$$;
+
+CREATE TRIGGER settlement_rows_report_open
+    BEFORE INSERT ON settlement_rows
+    FOR EACH ROW EXECUTE FUNCTION settlement_check_report_open();
+
 CREATE TRIGGER settlement_reports_append_only
     BEFORE UPDATE OR DELETE ON settlement_reports
     FOR EACH ROW EXECUTE FUNCTION ledger_reject_modification();

@@ -19,5 +19,7 @@ class SettlementPropertiesTest {
     assertThat(properties.maxFileSize()).isEqualTo(DataSize.ofMegabytes(10));
     assertThat(properties.maxRows()).isEqualTo(100_000);
     assertThat(properties.maxStoredErrors()).isEqualTo(1_000);
+    // Only mock-psp's exports escape formulas, so only its files have the escape undone.
+    assertThat(properties.formulaEscapingPsps()).containsExactly("mock-psp");
   }
 }

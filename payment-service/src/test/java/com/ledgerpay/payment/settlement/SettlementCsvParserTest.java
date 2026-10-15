@@ -20,7 +20,7 @@ class SettlementCsvParserTest {
   final SettlementCsvParser parser = new SettlementCsvParser(100_000, 1_000);
 
   Result parse(String csv) {
-    return parser.parse(csv.getBytes(StandardCharsets.UTF_8), DAY);
+    return parser.parse(csv.getBytes(StandardCharsets.UTF_8), DAY, true);
   }
 
   @Test
@@ -72,6 +72,24 @@ class SettlementCsvParserTest {
 
     assertThat(result.valid()).isTrue();
     assertThat(result.rows().getFirst().merchantId()).isEqualTo("=m_1");
+  }
+
+  /**
+   * Only mock-psp escapes formulas. From any other PSP a leading quote is part of the value: taking
+   * it off would store a reference that matches nothing, with no error to say why.
+   */
+  @Test
+  void aLeadingQuoteIsKeptFromAPspThatDoesNotEscapeFormulas() {
+    Result result =
+        parser.parse(
+            (HEADER + "'+A1B2,req_1,CAPTURE,'=m_1,10000,GBP,2026-10-13T10:00:00Z\n")
+                .getBytes(StandardCharsets.UTF_8),
+            DAY,
+            false);
+
+    assertThat(result.valid()).isTrue();
+    assertThat(result.rows().getFirst().pspReference()).isEqualTo("'+A1B2");
+    assertThat(result.rows().getFirst().merchantId()).isEqualTo("'=m_1");
   }
 
   @Test
@@ -204,7 +222,7 @@ class SettlementCsvParserTest {
     byte[] latin1 =
         (HEADER + "psp_1,req_1,CAPTURE,m_é,1,GBP,2026-10-13T10:00:00Z\n")
             .getBytes(StandardCharsets.ISO_8859_1);
-    Result result = parser.parse(latin1, DAY);
+    Result result = parser.parse(latin1, DAY, true);
     assertThat(result.errors()).hasSize(1);
     assertThat(result.errors().getFirst().line()).isEqualTo(2);
     assertThat(result.errors().getFirst().message()).startsWith("not valid UTF-8");
@@ -217,7 +235,8 @@ class SettlementCsvParserTest {
   void tooManyRowsIsOneErrorAtTheFirstRowOverTheLimit() {
     Result result =
         new SettlementCsvParser(2, 1_000)
-            .parse((HEADER + CAPTURE + REFUND + CAPTURE).getBytes(StandardCharsets.UTF_8), DAY);
+            .parse(
+                (HEADER + CAPTURE + REFUND + CAPTURE).getBytes(StandardCharsets.UTF_8), DAY, true);
 
     assertThat(result.rowCount()).isEqualTo(3);
     assertThat(result.errors())
@@ -230,7 +249,7 @@ class SettlementCsvParserTest {
     String bad = "psp_x,req_x,CAPTURE,m_1,1.5,GBP,2026-10-13T10:00:00Z\n";
     Result result =
         new SettlementCsvParser(100, 3)
-            .parse((HEADER + bad.repeat(10)).getBytes(StandardCharsets.UTF_8), DAY);
+            .parse((HEADER + bad.repeat(10)).getBytes(StandardCharsets.UTF_8), DAY, true);
 
     assertThat(result.errorCount()).isEqualTo(10);
     assertThat(result.errors()).extracting(LineError::line).containsExactly(2, 3, 4);
