@@ -41,7 +41,14 @@ import org.testcontainers.junit.jupiter.Testcontainers;
     properties = {
       "spring.datasource.hikari.connection-timeout=1000",
       "spring.datasource.hikari.validation-timeout=250",
-      "ledgerpay.psp.webhook-secret=" + SignedWebhooks.SECRET
+      "ledgerpay.psp.webhook-secret=" + SignedWebhooks.SECRET,
+      // No background job may touch the pool: Hikari hands out a connection used in the last
+      // 500 ms without checking it, so a job that ran just before the database was stopped turned
+      // "cannot begin a transaction" into "rollback failed" on CI.
+      "ledgerpay.psp.worker.enabled=false",
+      "ledgerpay.inbox.processor.enabled=false",
+      "ledgerpay.outbox.relay.enabled=false",
+      "ledgerpay.recon.sweeper.enabled=false"
     })
 @Testcontainers
 class DatabaseOutageIntegrationTest {
