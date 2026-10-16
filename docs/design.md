@@ -379,15 +379,18 @@ CREATE TABLE settlement_rows (
     PRIMARY KEY (report_id, line_no)
 );
 
--- V9__reconciliation.sql (#18)
+-- V9__reconciliation.sql (#18). A run finishes once (RUNNING -> COMPLETED or FAILED) and items
+-- are accepted only while it runs; both enforced by triggers (ADR 0007).
 CREATE TABLE recon_runs (
     id             UUID PRIMARY KEY,
     report_id      UUID        NOT NULL REFERENCES settlement_reports(id),
-    snapshot_at    TIMESTAMPTZ NOT NULL,
     rules_version  TEXT        NOT NULL,
     status         TEXT        NOT NULL,   -- RUNNING / COMPLETED / FAILED
+    snapshot_at    TIMESTAMPTZ,            -- when the books were read; set on completion
     summary        JSONB,                  -- counts and amounts per category
-    created_at     TIMESTAMPTZ NOT NULL DEFAULT now()
+    error          TEXT,                   -- why it FAILED
+    created_at     TIMESTAMPTZ NOT NULL DEFAULT now(),
+    finished_at    TIMESTAMPTZ
 );
 
 CREATE TABLE recon_items (
@@ -396,7 +399,8 @@ CREATE TABLE recon_items (
     category          TEXT  NOT NULL,
     psp_reference     TEXT,
     psp_operation_id  UUID,
-    external_line_nos INT[],
+    external_line_nos INT[] NOT NULL DEFAULT '{}',
+    internal          JSONB,               -- our operation as the snapshot saw it
     diff              JSONB,               -- field-by-field differences
     PRIMARY KEY (run_id, item_no)
 );
@@ -459,8 +463,9 @@ Every merchant write requires an `Idempotency-Key` header. A settlement report u
 | POST | `/webhooks/psp` | Inbound PSP webhook (HMAC, not API key) | 200 | 401 / 400 / 503 |
 | POST | `/ops/settlement-reports?businessDate=&psp=` | Upload a PSP settlement CSV (`text/csv`) | 201, or 200 for an identical file | 400 `INVALID_CSV` / 413 / 415 |
 | GET | `/ops/settlement-reports/{id}`, `/ops/settlement-reports?businessDate=&psp=` | One version with its errors; every version of a day | 200 | 404 |
-| POST | `/ops/recon-runs` | Reconcile a specific report version | 202 | 404 |
-| GET | `/ops/recon-runs/{id}`, `/ops/recon-runs/{id}/items` | Run summary and item-level breaks | 200 | 404 |
+| POST | `/ops/recon-runs` | Reconcile a specific report version: `{"reportId": …}` | 202 (RUNNING) | 404 / 409 `INVALID_STATE` for an INVALID report |
+| GET | `/ops/recon-runs/{id}`, `/ops/recon-runs?reportId=` | A run with its summary; every run of a report, oldest first | 200 | 404 |
+| GET | `/ops/recon-runs/{id}/items?category=&offset=&limit=` | Item-level breaks with their report lines, our operation and the diff; up to 1,000 a page | 200 | 400 / 404 |
 | POST | `/ops/psp-operations/{id}/inquiry` | Trigger a PSP status inquiry | 202 | 404 |
 | GET | `/actuator/health`, `/actuator/prometheus` | Health and metrics | 200 | |
 
@@ -695,26 +700,26 @@ End-to-end exactly-once is not realistic for business side effects; the design i
 
 ### 11.2 Matching and classification
 
-The internal side is read in a single `REPEATABLE READ` read-only transaction, so the whole run sees one consistent snapshot; `snapshot_at` is recorded. The internal set is every successful capture and refund whose `succeeded_at` falls in the business day, plus any local operation referenced by the report (to detect operations still PENDING locally).
+A run is stored RUNNING and carried out in the background (`ReconEngine`); the client polls it. The internal side is read in a single `REPEATABLE READ` read-only transaction (`BooksSnapshot`), so the whole run sees one consistent snapshot whatever commits meanwhile; `snapshot_at` is recorded. The internal set is every successful capture and refund whose `succeeded_at` falls in the business day, plus any local operation the report refers to by reference or request ID, whatever its type or status (to detect operations still PENDING locally). Classification (`Reconciler`) is a pure function of the report's rows and that set.
 
 Matching is one-to-one on `psp_reference`, falling back to `psp_request_id`. **Matching on amount and approximate time alone is forbidden.**
 
 | Category | Rule | Handling |
 |---|---|---|
-| `MATCHED` | One-to-one; type, amount, currency, merchant and date agree | Recorded, no alert |
+| `MATCHED` | One-to-one; type, amount, currency, merchant and date agree, and the operation is SUCCEEDED | Recorded, no alert |
 | `DUPLICATE_EXTERNAL` | Same PSP reference on several rows of one report | Whole group is a break; no row is picked to match |
-| `MISSING_INTERNAL` | In the report, not found locally | Keep the external record, trigger an inquiry; **never create business from the report** |
+| `MISSING_INTERNAL` | In the report, not found locally | Keep the external record and investigate with the PSP; **never create business from the report** |
 | `MISSING_EXTERNAL` | Succeeded locally that day, absent from the report | Check for dropped rows, report version and success date |
-| `AMOUNT_MISMATCH` | Matched, but amount, merchant or date differ | Field-level diff; **never overwrite local amounts** |
-| `STATUS_MISMATCH` | Succeeded at the PSP, PENDING or FAILED locally | Trigger an inquiry; PENDING resolves through normal posting; conflicting final states need review |
+| `AMOUNT_MISMATCH` | Matched, but type, amount, currency, merchant or date differ (or the reference, when matched by request ID) | Field-level diff `{field: {external, internal}}`; **never overwrite local amounts** |
+| `STATUS_MISMATCH` | Succeeded at the PSP, PENDING or FAILED locally | The operator triggers an inquiry for the item's `pspOperationId`; PENDING resolves through normal posting; conflicting final states need review |
 
-The primary category follows the order duplicate → unmatched → field conflict → status conflict, so every external row and every internal record ends up in exactly one category and the counts are disjoint.
+The primary category follows the order duplicate → unmatched → field conflict → status conflict, so every external row and every internal record ends up in exactly one category and the counts are disjoint. A row that would match an operation another row has already matched is part of a DUPLICATE_EXTERNAL item. Only the day of `succeeded_at` is compared, not the time. A run never sends inquiries itself (ADR 0007).
 
 A separate **ledger integrity check** runs regardless of the report: exactly one journal per successful capture or refund, every journal balanced, all postings sum to zero, and any balance cache agrees with postings. Any failure is a blocking alert.
 
 ### 11.3 Results
-- Completed runs are **immutable**. After a fix, a new run is created and old runs remain for comparison.
-- The summary shows raw external row count, unique transaction count, total captured, total refunded, net, and count and amount per category. **Equal net totals never replace item-level matching.**
+- Completed runs are **immutable**, items included; each item keeps our operation as the snapshot saw it. After a fix, a new run is created and old runs remain for comparison. A run left RUNNING by a dead process is marked FAILED after `ledgerpay.recon.abandoned-after` (10 minutes), and the report can simply be run again.
+- The summary shows raw external row count, unique transaction count, captured, refunded and net for the report and for our books, and per category the items, report rows and our records in it and their amount. **Equal net totals never replace item-level matching.**
 - Reconciliation only reports; it **never mutates the ledger**. Fixes go through the normal path (inquiry → money transaction).
 
 ---

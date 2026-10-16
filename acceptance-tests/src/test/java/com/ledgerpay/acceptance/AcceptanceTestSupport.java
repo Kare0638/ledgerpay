@@ -14,6 +14,9 @@ import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
 import java.time.Duration;
+import java.time.LocalDate;
+import java.time.OffsetDateTime;
+import java.time.ZoneOffset;
 import java.util.UUID;
 import org.junit.jupiter.api.BeforeEach;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -126,5 +129,45 @@ abstract class AcceptanceTestSupport {
         .param(paymentId)
         .query(Long.class)
         .single();
+  }
+
+  /** The UTC day on which mock-psp says the operation succeeded. */
+  LocalDate successDay(String pspReference) {
+    return mockPsp
+        .sql("SELECT succeeded_at FROM operations WHERE psp_reference = ?")
+        .param(pspReference)
+        .query(OffsetDateTime.class)
+        .single()
+        .withOffsetSameInstant(ZoneOffset.UTC)
+        .toLocalDate();
+  }
+
+  /** mock-psp's settlement report for the day. */
+  String export(LocalDate day) throws Exception {
+    var response =
+        http.send(
+            HttpRequest.newBuilder(
+                    URI.create(LiveStack.mockPspUrl() + "/reports/settlement?date=" + day))
+                .build(),
+            HttpResponse.BodyHandlers.ofString());
+    assertThat(response.statusCode()).isEqualTo(200);
+    return response.body();
+  }
+
+  /** A request to payment-service's {@code /ops} endpoints, with the ops key. */
+  HttpResponse<String> ops(String method, String path, String contentType, String body)
+      throws Exception {
+    var request =
+        HttpRequest.newBuilder(URI.create(LiveStack.paymentUrl() + path))
+            .header("Authorization", "Bearer " + LiveStack.OPS_KEY)
+            .method(
+                method,
+                body == null
+                    ? HttpRequest.BodyPublishers.noBody()
+                    : HttpRequest.BodyPublishers.ofString(body));
+    if (contentType != null) {
+      request.header("Content-Type", contentType);
+    }
+    return http.send(request.build(), HttpResponse.BodyHandlers.ofString());
   }
 }

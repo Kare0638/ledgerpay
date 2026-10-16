@@ -2,7 +2,7 @@
 
 A payment, double-entry ledger and settlement reconciliation service in Java 21 and Spring Boot, built around the failure modes that matter in payments: client retries, PSP timeouts with unknown outcomes, lost or duplicated webhooks, concurrent refunds, and books that disagree with the PSP's settlement report.
 
-> **Status (October 2026):** the core payment flow with partial refunds, the ledger, failure handling around the PSP and the event pipeline to signed merchant webhooks are built and tested, and the whole flow runs with one command ([quick start](#quick-start)). Reconciliation has started: the PSP's daily settlement report is exported and imported; matching it against the books is next. Progress is tracked on the [milestones](https://github.com/Kare0638/ledgerpay/milestones).
+> **Status (October 2026):** the core payment flow with partial refunds, the ledger, failure handling around the PSP and the event pipeline to signed merchant webhooks are built and tested, and the whole flow runs with one command ([quick start](#quick-start)). Reconciliation works end to end: the PSP's daily settlement report is imported and matched against the books item by item. The ledger integrity check and the demo data set are next. Progress is tracked on the [milestones](https://github.com/Kare0638/ledgerpay/milestones).
 
 ## Built and tested
 
@@ -16,17 +16,18 @@ A payment, double-entry ledger and settlement reconciliation service in Java 21 
 - **Transactional outbox to Kafka**: every event is written in the transaction that makes the change, so a rollback leaves none. A relay publishes to `payments.events` keyed by payment ID (`acks=all`, idempotent producer) and marks events only after the broker acknowledges: at-least-once, with the outbox ID as `eventId` for consumers to de-duplicate. A payment's next event waits until the previous one is published, so concurrent relays cannot reorder it. With Kafka down, payments carry on and events wait in the table ([ADR 0006](docs/adr/0006-transactional-outbox-at-least-once.md)).
 - **Signed merchant webhooks from Kafka**: notification-service consumes `payments.events`, skips event IDs it has processed, and POSTs the event to the merchant's endpoint, signed with a per-merchant secret it generates at registration. A failing merchant is retried three times with exponential backoff, then the event goes to `payments.events.dlq`; a malformed event goes there at once ([ADR 0006](docs/adr/0006-transactional-outbox-at-least-once.md)).
 - **Settlement reports imported whole or not at all**: mock-psp exports each UTC day's successful captures and refunds from its own records. The import validates every field of every row and stores the file as VALID with all its rows, or as INVALID with each error's line and column and no rows (AT-16). Re-sending a file returns the stored report, a corrected file becomes the next version, and versions are append-only. CSV is escaped against spreadsheet formulas ([ADR 0007](docs/adr/0007-reconciliation-never-mutates-the-ledger-utc-business-days.md)).
+- **Item-level reconciliation that only reads**: a run matches each report row to our operation by PSP reference, or by request ID, never by amount and time. Every row and every operation ends up in exactly one category: MATCHED, DUPLICATE_EXTERNAL, MISSING_INTERNAL, MISSING_EXTERNAL, AMOUNT_MISMATCH (with a field-level diff) or STATUS_MISMATCH. Nets that agree cannot hide a break. Our side is read in one `REPEATABLE READ` snapshot, so a posting committed mid-run is not in it (AT-18). Runs are immutable and never touch the ledger. A lost webhook shows up as a STATUS_MISMATCH, is fixed through an inquiry, and the next run matches it while the first run is kept (AT-15, AT-17).
 - **A mock PSP with fault injection**: decline, timeout after commit, dropped, duplicated, out-of-order and delayed webhooks, used by acceptance tests that run payment-service against the real mock-psp process and PostgreSQL.
 - **CI quality gate**: every push runs the unit, Testcontainers and acceptance tests, and fails below 80 % line coverage in any module ([below](#running-the-tests)).
 - **Performance analysis**: a JMH benchmark of PSP calls on virtual threads against platform thread pools, and JFR recordings under k6 load ([below](#performance)).
 
-Acceptance tests from the [design's list](docs/design.md): AT-01 to AT-14 and AT-16 pass, 15 of 19.
+Acceptance tests from the [design's list](docs/design.md): AT-01 to AT-18 pass, 18 of 19.
 
 ## Planned
 
 | Milestone | What | Issues |
 |---|---|---|
-| M3: reconciliation and observability | Matching on a consistent snapshot with classified breaks, ledger integrity check, demo data | #18–#21 |
+| M3: reconciliation and observability | Ledger integrity check, property-based ledger tests, demo data set with report variants | #19–#21 |
 | | Metrics, Grafana dashboard, alert rules, structured logs | #22 |
 | M4: performance and cloud | Published k6 results, Terraform for ECS Fargate and RDS | #23, #24 |
 | Optional | An LLM assistant that drafts analyses of reconciliation breaks; SQS/SNS adapter | #26, #25 |
@@ -67,7 +68,7 @@ scripts/demo.sh
 - the merchant payable moved by −6900 (−9900 on capture, with the 1 % fee kept, then +3000 on refund);
 - every event reached Kafka through the outbox;
 - every event was delivered to the merchant as a signed webhook;
-- mock-psp's settlement report for the day imports as VALID and holds the capture and the refund.
+- mock-psp's settlement report for the day imports as VALID, and reconciling it against the books matches the capture and the refund.
 
 It stops with `FAILED` on the first mismatch. The first build downloads Maven dependencies and takes a few minutes. `scripts/demo.sh --fresh` first deletes the stack's volumes, for a database left by an older checkout.
 
@@ -109,6 +110,21 @@ curl -s -X POST "localhost:8080/ops/settlement-reports?businessDate=$DAY" \
 # 400 INVALID_CSV, kept as version 2 with no rows: "errors":[{"line":2,"column":"amount_minor",…}]
 ```
 
+Reconcile the VALID version (`REPORT` is its `reportId`) and read the breaks:
+
+```bash
+curl -s -X POST localhost:8080/ops/recon-runs -H 'Authorization: Bearer dev-only-ops-key' \
+  -H 'Content-Type: application/json' -d "{\"reportId\":\"$REPORT\"}"
+# 202 {"runId":"…","status":"RUNNING",…}; poll it until COMPLETED
+curl -s localhost:8080/ops/recon-runs/$RUN -H 'Authorization: Bearer dev-only-ops-key'
+# "summary":{"externalRows":…,"external":{"netMinor":…},"internal":{…},"categories":{"MATCHED":{…},…}}
+curl -s "localhost:8080/ops/recon-runs/$RUN/items?category=STATUS_MISMATCH" \
+  -H 'Authorization: Bearer dev-only-ops-key'
+# each break with its report lines, our operation as the run saw it, and the field diff
+```
+
+A payment whose webhook was lost (`DROP_WEBHOOK` below) shows up as a `STATUS_MISMATCH`. `POST /ops/psp-operations/{pspOperationId}/inquiry` books it through the normal path, and a new run of the same report has it `MATCHED`.
+
 ### Triggering faults
 
 mock-psp runs with the `dev` profile in Compose, which enables `/_admin/faults`. A rule applies to the merchant's next operations of one type:
@@ -127,7 +143,7 @@ curl -s -X DELETE localhost:8081/_admin/faults        # clear them all
 | `DUPLICATE_WEBHOOK` | Twelve deliveries of one outcome, one journal |
 | `OUT_OF_ORDER` | A stale `PENDING` after the outcome is ignored |
 | `DELAY_WEBHOOK` | The payment stays pending until the late webhook arrives |
-| `DROP_WEBHOOK` | The outcome is never sent: the payment stays pending until the safety-net inquiry (15 minutes) or, later, reconciliation |
+| `DROP_WEBHOOK` | The outcome is never sent: the payment stays pending until the safety-net inquiry (15 minutes), or until reconciliation finds it as a `STATUS_MISMATCH` and an operator inquires |
 
 Operation types are `AUTHORIZE`, `CAPTURE`, `VOID` and `REFUND`. Each fault also has an acceptance test that asserts both databases (AT-06 to AT-09, AT-12).
 
