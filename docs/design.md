@@ -702,7 +702,7 @@ End-to-end exactly-once is not realistic for business side effects; the design i
 
 A run is stored RUNNING and carried out in the background (`ReconEngine`); the client polls it. The internal side is read in a single `REPEATABLE READ` read-only transaction (`BooksSnapshot`), so the whole run sees one consistent snapshot whatever commits meanwhile; `snapshot_at` is recorded. The internal set is every successful capture and refund whose `succeeded_at` falls in the business day, plus any local operation the report refers to by reference or request ID, whatever its type or status (to detect operations still PENDING locally). Classification (`Reconciler`) is a pure function of the report's rows and that set.
 
-Matching is one-to-one on `psp_reference`, falling back to `psp_request_id`. **Matching on amount and approximate time alone is forbidden.**
+Matching is one-to-one on `psp_reference`, falling back to `psp_request_id`. Every reference is matched before any request ID, so a row with a wrong reference cannot take an operation from a later row that names it exactly; a duplicate group falls back to the request ID too when all its rows carry the same one. **Matching on amount and approximate time alone is forbidden.**
 
 | Category | Rule | Handling |
 |---|---|---|
@@ -713,12 +713,12 @@ Matching is one-to-one on `psp_reference`, falling back to `psp_request_id`. **M
 | `AMOUNT_MISMATCH` | Matched, but type, amount, currency, merchant or date differ (or the reference, when matched by request ID) | Field-level diff `{field: {external, internal}}`; **never overwrite local amounts** |
 | `STATUS_MISMATCH` | Succeeded at the PSP, PENDING or FAILED locally | The operator triggers an inquiry for the item's `pspOperationId`; PENDING resolves through normal posting; conflicting final states need review |
 
-The primary category follows the order duplicate → unmatched → field conflict → status conflict, so every external row and every internal record ends up in exactly one category and the counts are disjoint. A row that would match an operation another row has already matched is part of a DUPLICATE_EXTERNAL item. Only the day of `succeeded_at` is compared, not the time. A run never sends inquiries itself (ADR 0007).
+The primary category follows the order duplicate → unmatched → field conflict → status conflict, so every external row ends up in exactly one category, and so does every internal record the report must have (succeeded that day) or that a row was matched to; the counts are disjoint. Other operations in the snapshot are only candidates for matching. A row whose request ID leads to an operation another row already has is a DUPLICATE_EXTERNAL item of its own. Only the day of `succeeded_at` is compared, not the time. A run never sends inquiries itself (ADR 0007).
 
 A separate **ledger integrity check** runs regardless of the report: exactly one journal per successful capture or refund, every journal balanced, all postings sum to zero, and any balance cache agrees with postings. Any failure is a blocking alert.
 
 ### 11.3 Results
-- Completed runs are **immutable**, items included; each item keeps our operation as the snapshot saw it. After a fix, a new run is created and old runs remain for comparison. A run left RUNNING by a dead process is marked FAILED after `ledgerpay.recon.abandoned-after` (10 minutes), and the report can simply be run again.
+- Completed runs are **immutable**, items included; each item keeps our operation as the snapshot saw it. After a fix, a new run is created and old runs remain for comparison. A run renews `heartbeat_at` every fifth of `ledgerpay.recon.abandoned-after` (10 minutes) while it executes; one whose heartbeat is older than that was left by a dead process and is marked FAILED, and the report can simply be run again. A long run that is still at work is never swept. A run the executor refuses (shutdown) is FAILED at once.
 - The summary shows raw external row count, unique transaction count, captured, refunded and net for the report and for our books, and per category the items, report rows and our records in it and their amount. **Equal net totals never replace item-level matching.**
 - Reconciliation only reports; it **never mutates the ledger**. Fixes go through the normal path (inquiry → money transaction).
 

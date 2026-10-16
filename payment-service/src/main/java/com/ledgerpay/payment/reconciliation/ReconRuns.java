@@ -111,15 +111,25 @@ public class ReconRuns {
         .update();
   }
 
-  /** Marks runs RUNNING for longer than {@code after} as FAILED; returns how many. */
+  /** The run is still being worked on; the sweeper leaves it alone while this keeps coming. */
+  public void heartbeat(UUID runId) {
+    jdbc.sql("UPDATE recon_runs SET heartbeat_at = now() WHERE id = ? AND status = 'RUNNING'")
+        .param(runId)
+        .update();
+  }
+
+  /**
+   * Marks RUNNING runs whose heartbeat is older than {@code after} as FAILED: whatever was running
+   * them has died. Returns how many.
+   */
   public int failAbandoned(Duration after) {
     return jdbc.sql(
             """
             UPDATE recon_runs
                SET status = 'FAILED', finished_at = now(),
-                   error = 'abandoned: still running after ' || :seconds || ' s'
+                   error = 'abandoned: no heartbeat for ' || :seconds || ' s'
              WHERE status = 'RUNNING'
-               AND created_at < now() - :seconds * interval '1 second'""")
+               AND heartbeat_at < now() - :seconds * interval '1 second'""")
         .param("seconds", after.toSeconds())
         .update();
   }

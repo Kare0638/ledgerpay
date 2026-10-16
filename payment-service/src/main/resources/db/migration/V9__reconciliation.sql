@@ -11,6 +11,7 @@ CREATE TABLE recon_runs (
     summary        JSONB,                             -- counts and amounts per category
     error          TEXT,                              -- why a run FAILED
     created_at     TIMESTAMPTZ NOT NULL DEFAULT now(),
+    heartbeat_at   TIMESTAMPTZ NOT NULL DEFAULT now(),  -- renewed while the run executes
     finished_at    TIMESTAMPTZ,
     CHECK ((status = 'COMPLETED') = (summary IS NOT NULL)),
     CHECK (status <> 'COMPLETED' OR snapshot_at IS NOT NULL),
@@ -18,7 +19,9 @@ CREATE TABLE recon_runs (
     CHECK ((status = 'FAILED') = (error IS NOT NULL))
 );
 CREATE INDEX idx_recon_runs_report ON recon_runs(report_id, created_at);
-CREATE INDEX idx_recon_runs_running ON recon_runs(created_at) WHERE status = 'RUNNING';
+-- The sweeper fails a RUNNING run whose heartbeat has stopped: its process died. Age alone would
+-- also fail a long run that is still at work.
+CREATE INDEX idx_recon_runs_running ON recon_runs(heartbeat_at) WHERE status = 'RUNNING';
 
 -- Every external row and every internal record of a run is in exactly one item.
 CREATE TABLE recon_items (

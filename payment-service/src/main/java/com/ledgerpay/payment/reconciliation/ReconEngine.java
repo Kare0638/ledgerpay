@@ -3,9 +3,14 @@ package com.ledgerpay.payment.reconciliation;
 import com.ledgerpay.payment.settlement.SettlementReport;
 import com.ledgerpay.payment.settlement.SettlementReports;
 import com.ledgerpay.payment.settlement.SettlementRow;
+import java.time.Duration;
 import java.util.List;
 import java.util.UUID;
 import java.util.concurrent.ExecutorService;
+import java.util.concurrent.RejectedExecutionException;
+import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.ScheduledFuture;
+import java.util.concurrent.TimeUnit;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Qualifier;
@@ -29,18 +34,24 @@ public class ReconEngine {
   private final BooksSnapshot books;
   private final TransactionTemplate transactions;
   private final ExecutorService executor;
+  private final ScheduledExecutorService heartbeat;
+  private final Duration heartbeatInterval;
 
   public ReconEngine(
       ReconRuns runs,
       SettlementReports reports,
       BooksSnapshot books,
       TransactionTemplate transactions,
-      @Qualifier("reconExecutor") ExecutorService executor) {
+      @Qualifier("reconExecutor") ExecutorService executor,
+      @Qualifier("reconHeartbeat") ScheduledExecutorService heartbeat,
+      ReconProperties properties) {
     this.runs = runs;
     this.reports = reports;
     this.books = books;
     this.transactions = transactions;
     this.executor = executor;
+    this.heartbeat = heartbeat;
+    this.heartbeatInterval = properties.heartbeatInterval();
   }
 
   /** Starts a run of a VALID report; the caller has checked that it is one. */
@@ -50,11 +61,21 @@ public class ReconEngine {
     }
     UUID runId = UUID.randomUUID();
     runs.insertRunning(runId, report.reportId(), Reconciler.RULES_VERSION);
-    executor.execute(() -> execute(runId, report));
+    try {
+      executor.execute(() -> execute(runId, report));
+    } catch (RejectedExecutionException e) {
+      // Shutting down. The run is already stored, so fail it now rather than leave it looking in
+      // progress until the sweeper gives up on it.
+      runs.fail(runId, "not started: " + e.getMessage());
+      throw e;
+    }
     return runs.find(runId).orElseThrow();
   }
 
   void execute(UUID runId, SettlementReport report) {
+    long every = heartbeatInterval.toMillis();
+    ScheduledFuture<?> beating =
+        heartbeat.scheduleAtFixedRate(() -> beat(runId), every, every, TimeUnit.MILLISECONDS);
     try {
       List<SettlementRow> rows = reports.rows(report.reportId());
       BooksSnapshot.Snapshot snapshot = books.read(runId, report.reportId(), report.businessDate());
@@ -88,6 +109,17 @@ public class ReconEngine {
     } catch (RuntimeException e) {
       log.error("Recon run {} failed", runId, e);
       runs.fail(runId, e.getClass().getSimpleName() + ": " + e.getMessage());
+    } finally {
+      beating.cancel(false);
+    }
+  }
+
+  private void beat(UUID runId) {
+    try {
+      runs.heartbeat(runId);
+    } catch (RuntimeException e) {
+      // Missed beats are only a problem if they go on for abandoned-after; the next one may land.
+      log.warn("Recon run {} heartbeat failed: {}", runId, e.getMessage());
     }
   }
 

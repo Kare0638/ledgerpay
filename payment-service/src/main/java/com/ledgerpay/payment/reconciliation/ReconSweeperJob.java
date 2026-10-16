@@ -8,8 +8,9 @@ import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Component;
 
 /**
- * A run whose process died stays RUNNING; this marks it FAILED once it is older than {@code
- * ledgerpay.recon.abandoned-after}, so that nobody waits on it. Its report can simply be run again.
+ * A run whose process died stays RUNNING; this marks it FAILED once its heartbeat is older than
+ * {@code ledgerpay.recon.abandoned-after}, so that nobody waits on it. Its report can simply be run
+ * again.
  */
 @Component
 @EnableScheduling

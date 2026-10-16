@@ -8,6 +8,7 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.ledgerpay.payment.PostgresTestcontainersConfiguration;
 import com.ledgerpay.payment.settlement.SettlementImporter;
+import com.ledgerpay.payment.settlement.SettlementReports;
 import java.net.URI;
 import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
@@ -23,6 +24,10 @@ import java.util.List;
 import java.util.Map;
 import java.util.UUID;
 import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.RejectedExecutionException;
+import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.ThreadLocalRandom;
 import java.util.concurrent.TimeUnit;
 import org.junit.jupiter.api.AfterEach;
@@ -36,6 +41,7 @@ import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Import;
 import org.springframework.dao.DataAccessException;
 import org.springframework.jdbc.core.simple.JdbcClient;
+import org.springframework.transaction.support.TransactionTemplate;
 
 /**
  * Reconciliation runs over HTTP and PostgreSQL (design §11.2, §11.3): the single-fault report
@@ -102,6 +108,9 @@ class ReconRunIntegrationTest {
   @Autowired SettlementImporter importer;
   @Autowired ReconRuns runs;
   @Autowired PausingProbe probe;
+  @Autowired SettlementReports settlementReports;
+  @Autowired BooksSnapshot books;
+  @Autowired TransactionTemplate transactions;
 
   final HttpClient http = HttpClient.newHttpClient();
   String merchant;
@@ -505,5 +514,71 @@ class ReconRunIntegrationTest {
     assertThat(run.error()).startsWith("abandoned");
     assertThat(run.summary()).isNull();
     assertThat(runs.countItems(runId, null)).isZero();
+  }
+
+  /** An engine of its own, abandoned after one second, so that a test can outlast that. */
+  ReconEngine engine(ExecutorService executor, ScheduledExecutorService heartbeat) {
+    return new ReconEngine(
+        runs,
+        settlementReports,
+        books,
+        transactions,
+        executor,
+        heartbeat,
+        new ReconProperties(Duration.ofSeconds(1), Duration.ofMinutes(1)));
+  }
+
+  /**
+   * A run that takes longer than abandoned-after but is still at work keeps renewing its heartbeat,
+   * so the sweeper leaves it alone and it completes.
+   */
+  @Test
+  void aLongRunStillAtWorkIsNotGivenUpAsAbandoned() throws Exception {
+    standardDay("SUCCEEDED");
+    var report = settlementReports.find(report(standardRows())).orElseThrow();
+    ScheduledExecutorService heartbeat = Executors.newSingleThreadScheduledExecutor();
+    try (ExecutorService executor = Executors.newVirtualThreadPerTaskExecutor()) {
+      probe.reached = new CountDownLatch(1);
+      probe.release = new CountDownLatch(1);
+      UUID runId = engine(executor, heartbeat).start(report).runId();
+      assertThat(probe.reached.await(10, TimeUnit.SECONDS)).isTrue();
+
+      // Twice abandoned-after inside the snapshot, then the sweeper looks.
+      Thread.sleep(2_000);
+      runs.failAbandoned(Duration.ofSeconds(1));
+      assertThat(runs.find(runId).orElseThrow().status()).isEqualTo("RUNNING");
+
+      probe.release.countDown();
+      await()
+          .atMost(Duration.ofSeconds(10))
+          .until(() -> runs.find(runId).orElseThrow().status().equals("COMPLETED"));
+    } finally {
+      heartbeat.shutdownNow();
+    }
+  }
+
+  /** Shutting down: a run that cannot be handed to the executor is FAILED at once. */
+  @Test
+  void aRunThatCannotBeStartedIsFailedAtOnce() throws Exception {
+    standardDay("SUCCEEDED");
+    UUID reportId = report(standardRows());
+    ExecutorService closed = Executors.newVirtualThreadPerTaskExecutor();
+    closed.close();
+    ScheduledExecutorService heartbeat = Executors.newSingleThreadScheduledExecutor();
+    try {
+      ReconEngine engine = engine(closed, heartbeat);
+      assertThatThrownBy(() -> engine.start(settlementReports.find(reportId).orElseThrow()))
+          .isInstanceOf(RejectedExecutionException.class);
+    } finally {
+      heartbeat.shutdownNow();
+    }
+
+    assertThat(runs.forReport(reportId))
+        .singleElement()
+        .satisfies(
+            run -> {
+              assertThat(run.status()).isEqualTo("FAILED");
+              assertThat(run.error()).startsWith("not started");
+            });
   }
 }

@@ -15,6 +15,7 @@ import java.util.Map;
 import java.util.Random;
 import java.util.Set;
 import java.util.UUID;
+import java.util.stream.Collectors;
 import java.util.stream.IntStream;
 import net.jqwik.api.Arbitraries;
 import net.jqwik.api.Arbitrary;
@@ -224,6 +225,54 @@ class ReconcilerTest {
     assertThat(item.diff()).containsOnlyKeys("psp_reference");
   }
 
+  /**
+   * Line 2 has a wrong reference but X's request ID; line 3 names X exactly. The exact match keeps
+   * X, and line 2 is a second claim on it, not the other way round.
+   */
+  @Test
+  void anExactReferenceMatchIsNotTakenByAnEarlierRowsRequestId() {
+    var x = op("psp_x", "CAPTURE", 10000, "SUCCEEDED");
+    var wrongReference =
+        new SettlementRow(2, "psp_typo", "req_psp_x", "CAPTURE", "m_1", 10000, "GBP", NOON);
+
+    List<ReconItem> items = classify(List.of(wrongReference, row(3, x)), List.of(x));
+
+    assertThat(items)
+        .extracting(ReconItem::externalLineNos, ReconItem::category, ReconItem::pspOperationId)
+        .containsExactly(
+            tuple(List.of(2), ReconCategory.DUPLICATE_EXTERNAL, null),
+            tuple(List.of(3), ReconCategory.MATCHED, x.id()));
+  }
+
+  /**
+   * A duplicated reference we do not know, whose rows all carry the request ID of our pending
+   * operation: the break names that operation rather than leaving it out of every item.
+   */
+  @Test
+  void aDuplicateGroupWithOneRequestIdIsLinkedToItsOperation() {
+    var pending =
+        new InternalOperation(
+            UUID.randomUUID(),
+            UUID.randomUUID(),
+            "m_1",
+            "CAPTURE",
+            "req_psp_1",
+            null,
+            10000,
+            "GBP",
+            "PENDING",
+            null);
+
+    List<ReconItem> items =
+        classify(
+            List.of(row(2, "psp_1", "CAPTURE", 10000), row(3, "psp_1", "CAPTURE", 10000)),
+            List.of(pending));
+
+    assertThat(items).singleElement();
+    assertThat(items.getFirst().category()).isEqualTo(ReconCategory.DUPLICATE_EXTERNAL);
+    assertThat(items.getFirst().pspOperationId()).isEqualTo(pending.id());
+  }
+
   @Test
   void neverMatchesOnAmountAndTimeAlone() {
     var ours = op("psp_ours", "CAPTURE", 10000, "SUCCEEDED");
@@ -339,6 +388,24 @@ class ReconcilerTest {
     Set<UUID> required = new HashSet<>();
     ops.stream().filter(o -> Reconciler.succeededOn(o, DAY)).forEach(o -> required.add(o.id()));
     assertThat(matchedOps).containsAll(required);
+    // A row alone on a reference we have is always given that operation, wherever it is in the
+    // file: no other row can take it by request ID.
+    Map<String, Long> perReference =
+        rows.stream()
+            .collect(Collectors.groupingBy(SettlementRow::pspReference, Collectors.counting()));
+    for (SettlementRow row : rows) {
+      ops.stream()
+          .filter(o -> row.pspReference().equals(o.pspReference()))
+          .findFirst()
+          .filter(o -> perReference.get(row.pspReference()) == 1)
+          .ifPresent(
+              o ->
+                  assertThat(items)
+                      .filteredOn(i -> i.externalLineNos().contains(row.lineNo()))
+                      .singleElement()
+                      .extracting(ReconItem::pspOperationId)
+                      .isEqualTo(o.id()));
+    }
     assertThat(items)
         .extracting(ReconItem::itemNo)
         .containsExactlyElementsOf(IntStream.rangeClosed(1, items.size()).boxed().toList());

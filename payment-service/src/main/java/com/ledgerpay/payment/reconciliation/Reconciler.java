@@ -26,15 +26,23 @@ import java.util.UUID;
  *   <li>Rows are grouped by PSP reference. A reference on several rows is DUPLICATE_EXTERNAL as a
  *       whole; no row of the group is picked to match.
  *   <li>A row matches our operation with the same PSP reference, or failing that the same request
- *       ID. Never by amount and time: two £100 captures a second apart are not the same one.
+ *       ID. Never by amount and time: two £100 captures a second apart are not the same one. Every
+ *       reference is matched before any request ID, so a row with a wrong reference cannot take an
+ *       operation from a later row that names it exactly. A duplicate group falls back to the
+ *       request ID too, when all its rows carry the same one.
+ *   <li>A row whose request ID leads to an operation another row already has is a second claim on
+ *       it: DUPLICATE_EXTERNAL, with no operation.
  *   <li>No operation: MISSING_INTERNAL. Type, merchant, amount, currency or day differ:
  *       AMOUNT_MISMATCH. The fields agree but our operation is not SUCCEEDED: STATUS_MISMATCH.
  *       Otherwise MATCHED.
  *   <li>Our succeeded captures and refunds of the day left unmatched are MISSING_EXTERNAL.
  * </ul>
  *
- * <p>Each report row and each of our operations ends up in exactly one item, so the categories'
- * counts add up to the totals.
+ * <p>Each report row ends up in exactly one item, and so does each of our operations that the
+ * report must have (a capture or refund that succeeded on the day) or that a row was matched to, so
+ * the categories' counts add up to the totals. The snapshot also holds operations the report only
+ * refers to, as candidates for matching; one that no row ends up matched to, and that the report
+ * need not have, is in no item.
  */
 public final class Reconciler {
 
@@ -59,24 +67,49 @@ public final class Reconciler {
       byRequestId.put(operation.pspRequestId(), operation);
     }
 
-    List<ReconItem> items = new ArrayList<>();
+    // Every reference first: an exact match must not lose its operation to an earlier row that
+    // only shares the request ID.
+    Map<String, InternalOperation> assigned = new HashMap<>();
     Set<UUID> matched = new HashSet<>();
+    for (String reference : groups.keySet()) {
+      InternalOperation operation = byReference.get(reference);
+      if (operation != null) {
+        assigned.put(reference, operation);
+        matched.add(operation.id());
+      }
+    }
+    // Then the request ID, in line order, for the groups still without one.
+    Set<String> secondClaims = new HashSet<>();
+    for (var group : groups.entrySet()) {
+      if (assigned.containsKey(group.getKey())) {
+        continue;
+      }
+      List<String> requestIds =
+          group.getValue().stream().map(SettlementRow::pspRequestId).distinct().toList();
+      InternalOperation operation =
+          requestIds.size() == 1 ? byRequestId.get(requestIds.getFirst()) : null;
+      if (operation == null) {
+        continue;
+      }
+      if (matched.add(operation.id())) {
+        assigned.put(group.getKey(), operation);
+      } else {
+        secondClaims.add(group.getKey());
+      }
+    }
+
+    List<ReconItem> items = new ArrayList<>();
     for (var group : groups.entrySet()) {
       String reference = group.getKey();
       List<SettlementRow> lines = group.getValue();
       List<Integer> lineNos = lines.stream().map(SettlementRow::lineNo).toList();
       SettlementRow row = lines.getFirst();
-      InternalOperation operation = byReference.get(reference);
-      if (operation == null && lines.size() == 1) {
-        operation = byRequestId.get(row.pspRequestId());
-      }
-      if (operation != null && !matched.add(operation.id())) {
-        // Already matched by another row: this row is a second claim on the same operation.
+      InternalOperation operation = assigned.get(reference);
+      if (secondClaims.contains(reference)) {
+        // Its request ID leads to an operation another row already has: a second claim on it.
         items.add(
             item(items, ReconCategory.DUPLICATE_EXTERNAL, reference, lineNos, null, Map.of()));
-        continue;
-      }
-      if (lines.size() > 1) {
+      } else if (lines.size() > 1) {
         items.add(
             item(items, ReconCategory.DUPLICATE_EXTERNAL, reference, lineNos, operation, Map.of()));
       } else if (operation == null) {
