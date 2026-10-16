@@ -12,9 +12,9 @@ spring:
   task:
     scheduling:
       pool:
-        # The PSP worker, the inbox processor and the outbox relay each get a thread: with
-        # Spring's default of one, webhooks waited behind every batch of PSP calls.
-        size: 3
+        # The PSP worker, the inbox processor, the outbox relay and the recon sweeper each get a
+        # thread: with Spring's default of one, webhooks waited behind every batch of PSP calls.
+        size: 4
   kafka:
     bootstrap-servers: ${KAFKA_BOOTSTRAP_SERVERS:localhost:9092}
     producer:
@@ -67,6 +67,10 @@ ledgerpay:
     publish-timeout: 15s
     # Refusals of one event for what it is (too large, not serialisable) before it is quarantined.
     max-rejections: 3
+  recon:
+    # A run still RUNNING this long is taken to have died with its process and marked FAILED.
+    abandoned-after: 10m
+    sweep-interval: 1m
   ops:
     # Hex SHA-256 of the operations key for /ops/**; unset turns those endpoints off.
     api-key-hash: ${OPS_API_KEY_HASH:}

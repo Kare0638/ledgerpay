@@ -10,8 +10,6 @@ import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
 import java.time.Duration;
 import java.time.LocalDate;
-import java.time.OffsetDateTime;
-import java.time.ZoneOffset;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
@@ -23,7 +21,7 @@ import org.junit.jupiter.api.Test;
 /**
  * The PSP's view of a day, from mock-psp's own records into payment-service (design §11.1): the
  * real export imports as a VALID report with every row, and a damaged copy is rejected whole
- * (AT-16), kept as an INVALID version with line errors and no rows to reconcile.
+ * (AT-16), kept as an INVALID version with line errors and no rows, which cannot be reconciled.
  */
 class SettlementReportAcceptanceTest extends AcceptanceTestSupport {
 
@@ -66,28 +64,6 @@ class SettlementReportAcceptanceTest extends AcceptanceTestSupport {
         .param(paymentId)
         .query()
         .listOfRows();
-  }
-
-  /** The UTC day on which mock-psp says the operation succeeded. */
-  LocalDate successDay(String pspReference) {
-    return mockPsp
-        .sql("SELECT succeeded_at FROM operations WHERE psp_reference = ?")
-        .param(pspReference)
-        .query(OffsetDateTime.class)
-        .single()
-        .withOffsetSameInstant(ZoneOffset.UTC)
-        .toLocalDate();
-  }
-
-  String export(LocalDate day) throws Exception {
-    var response =
-        http.send(
-            HttpRequest.newBuilder(
-                    URI.create(LiveStack.mockPspUrl() + "/reports/settlement?date=" + day))
-                .build(),
-            HttpResponse.BodyHandlers.ofString());
-    assertThat(response.statusCode()).isEqualTo(200);
-    return response.body();
   }
 
   Upload upload(String psp, LocalDate day, String csv) throws Exception {
@@ -209,6 +185,18 @@ class SettlementReportAcceptanceTest extends AcceptanceTestSupport {
       assertThat(error.path("line").asInt())
           .isEqualTo(damaged.getValue().equals("currency") ? 1 : captureLine);
       assertThat(storedRows(problem.path("reportId").asText())).isZero();
+      // ...and no reconciliation result can come from it.
+      String invalidId = problem.path("reportId").asText();
+      assertThat(
+              ops(
+                      "POST",
+                      "/ops/recon-runs",
+                      "application/json",
+                      "{\"reportId\": \"" + invalidId + "\"}")
+                  .statusCode())
+          .isEqualTo(409);
+      assertThat(ops("GET", "/ops/recon-runs?reportId=" + invalidId, null, null).body())
+          .isEqualTo("[]");
     }
 
     // The valid version is untouched, with all its rows.

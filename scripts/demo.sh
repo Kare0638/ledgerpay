@@ -6,7 +6,8 @@
 #
 # It seeds merchant m_demo with a new API key and registers its webhook endpoint, then pays £100,
 # captures it, refunds £30 and checks each money effect: the ledger, the balance, the Kafka event,
-# the signed webhook the merchant received and mock-psp's settlement report imported for the day.
+# the signed webhook the merchant received, and mock-psp's settlement report for the day, imported
+# and reconciled against the books.
 # Needs Docker with Compose v2, curl 7.76+ and bash 4.4+ (macOS ships 3.2: brew install bash).
 set -euo pipefail
 if (( BASH_VERSINFO[0] * 100 + BASH_VERSINFO[1] < 404 )); then
@@ -189,6 +190,23 @@ sql ledgerpay "SELECT line_no, psp_reference, txn_type, amount_minor, succeeded_
 FOUND=$(sql_value ledgerpay "SELECT count(*) FROM settlement_rows WHERE report_id = '$REPORT_ID'
                              AND psp_reference IN ('$CAPTURE_REF', '$REFUND_REF')")
 (( FOUND == EXPECTED_ROWS )) || fail "expected $EXPECTED_ROWS of this payment's rows, found $FOUND"
+
+step "Reconciliation: the report against the books, item by item"
+RUN=$(http -X POST "$API/ops/recon-runs" -H "Authorization: Bearer $OPS_KEY" \
+  -H 'Content-Type: application/json' -d "{\"reportId\":\"$REPORT_ID\"}")
+RUN_ID=$(field runId "$RUN")
+for _ in $(seq 1 30); do
+  RUN=$(http "$API/ops/recon-runs/$RUN_ID" -H "Authorization: Bearer $OPS_KEY")
+  [[ $(field status "$RUN") != RUNNING ]] && break
+  sleep 1
+done
+[[ $(field status "$RUN") == COMPLETED ]] || fail "recon run $RUN_ID is $(field status "$RUN")"
+sql ledgerpay "SELECT category, count(*) AS items FROM recon_items WHERE run_id = '$RUN_ID'
+               GROUP BY category ORDER BY category"
+OURS=$(sql_value ledgerpay "SELECT count(*) FROM recon_items WHERE run_id = '$RUN_ID'
+                            AND category = 'MATCHED'
+                            AND psp_reference IN ('$CAPTURE_REF', '$REFUND_REF')")
+(( OURS == EXPECTED_ROWS )) || fail "this payment's capture and refund should be MATCHED"
 
 step "Done"
 cat <<EOF

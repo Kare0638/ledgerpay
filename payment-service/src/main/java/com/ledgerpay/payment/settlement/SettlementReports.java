@@ -9,6 +9,7 @@ import java.sql.Timestamp;
 import java.time.LocalDate;
 import java.time.OffsetDateTime;
 import java.time.ZoneOffset;
+import java.util.Collection;
 import java.util.List;
 import java.util.Optional;
 import java.util.UUID;
@@ -27,6 +28,12 @@ public class SettlementReports {
       SELECT id, psp, business_date, version, status, row_count, error_count, errors, file_sha256,
              uploaded_at
         FROM settlement_reports""";
+
+  private static final String ROWS =
+      """
+      SELECT line_no, psp_reference, psp_request_id, txn_type, merchant_id, amount_minor,
+             currency, succeeded_at
+        FROM settlement_rows""";
 
   private static final TypeReference<List<LineError>> ERRORS = new TypeReference<>() {};
 
@@ -122,24 +129,33 @@ public class SettlementReports {
 
   /** A report's rows in file order. */
   public List<SettlementRow> rows(UUID reportId) {
-    return jdbc.sql(
-            """
-            SELECT line_no, psp_reference, psp_request_id, txn_type, merchant_id, amount_minor,
-                   currency, succeeded_at
-              FROM settlement_rows WHERE report_id = ? ORDER BY line_no""")
+    return jdbc.sql(ROWS + " WHERE report_id = ? ORDER BY line_no")
         .param(reportId)
-        .query(
-            (rs, row) ->
-                new SettlementRow(
-                    rs.getInt("line_no"),
-                    rs.getString("psp_reference"),
-                    rs.getString("psp_request_id"),
-                    rs.getString("txn_type"),
-                    rs.getString("merchant_id"),
-                    rs.getLong("amount_minor"),
-                    rs.getString("currency"),
-                    rs.getObject("succeeded_at", OffsetDateTime.class).toInstant()))
+        .query(SettlementReports::mapRow)
         .list();
+  }
+
+  /** The rows on these lines of the report, in file order. */
+  public List<SettlementRow> rowsAt(UUID reportId, Collection<Integer> lines) {
+    if (lines.isEmpty()) {
+      return List.of();
+    }
+    return jdbc.sql(ROWS + " WHERE report_id = ? AND line_no = ANY(?) ORDER BY line_no")
+        .params(reportId, lines.toArray(Integer[]::new))
+        .query(SettlementReports::mapRow)
+        .list();
+  }
+
+  private static SettlementRow mapRow(ResultSet rs, int row) throws SQLException {
+    return new SettlementRow(
+        rs.getInt("line_no"),
+        rs.getString("psp_reference"),
+        rs.getString("psp_request_id"),
+        rs.getString("txn_type"),
+        rs.getString("merchant_id"),
+        rs.getLong("amount_minor"),
+        rs.getString("currency"),
+        rs.getObject("succeeded_at", OffsetDateTime.class).toInstant());
   }
 
   private SettlementReport map(ResultSet rs, int row) throws SQLException {
