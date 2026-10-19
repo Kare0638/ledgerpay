@@ -225,13 +225,28 @@ class PspOperationWorkerIntegrationTest {
     }
     ThreadMXBean threads = ManagementFactory.getThreadMXBean();
     long before = threads.getTotalStartedThreadCount();
+    Set<Long> carriersBefore = carrierThreads();
 
     worker.runOnce();
 
     // Virtual threads are not counted here. Spring's fallback executor starts one per call: 6 for
-    // this batch of 5 when measured, against 0 to 2 with the fix (a carrier or pool thread may
-    // start meanwhile, depending on test order). Fewer than one per call is what matters.
-    assertThat(threads.getTotalStartedThreadCount() - before).isLessThan(5);
+    // this batch of 5 when measured, against 0 to 2 with the fix. Carriers of virtual threads are
+    // left out: the scheduler adds one when load from any test context peaks, which is not a thread
+    // per call, and with many cores the warm-up does not start them all. Fewer than one per call
+    // is what matters.
+    long carriersStarted =
+        carrierThreads().stream().filter(id -> !carriersBefore.contains(id)).count();
+    assertThat(threads.getTotalStartedThreadCount() - before - carriersStarted).isLessThan(5);
+  }
+
+  /** The virtual-thread scheduler's carriers now alive; they live on, so a new one stays seen. */
+  private static Set<Long> carrierThreads() {
+    return Thread.getAllStackTraces().keySet().stream()
+        .filter(
+            t ->
+                t.getThreadGroup() != null && t.getThreadGroup().getName().equals("CarrierThreads"))
+        .map(Thread::threadId)
+        .collect(Collectors.toSet());
   }
 
   // --- outcomes ----------------------------------------------------------------------------

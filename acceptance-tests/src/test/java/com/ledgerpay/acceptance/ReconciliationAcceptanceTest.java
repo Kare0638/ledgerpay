@@ -123,6 +123,10 @@ class ReconciliationAcceptanceTest extends AcceptanceTestSupport {
     assertThat(capturedMinor(paymentId)).isEqualTo(10000);
 
     JsonNode second = run(reportId);
+    // Every journal here came through the money transaction: the books agree with themselves on
+    // both runs, before the fix and after it (#19).
+    assertThat(first.path("ledgerIntegrity").path("status").asText()).isEqualTo("PASSED");
+    assertThat(second.path("ledgerIntegrity").path("status").asText()).isEqualTo("PASSED");
     assertThat(item(second, reference).path("category").asText()).isEqualTo("MATCHED");
 
     JsonNode firstAgain =

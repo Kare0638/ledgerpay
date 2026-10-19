@@ -30,8 +30,10 @@ public class ReconRuns {
   private static final String SELECT =
       """
       SELECT r.id, r.report_id, s.psp, s.business_date, s.version, r.status, r.rules_version,
-             r.snapshot_at, r.summary, r.error, r.created_at, r.finished_at
-        FROM recon_runs r JOIN settlement_reports s ON s.id = r.report_id""";
+             r.snapshot_at, r.summary, r.error, r.created_at, r.finished_at,
+             c.id AS check_id, c.status AS check_status, c.violation_count
+        FROM recon_runs r JOIN settlement_reports s ON s.id = r.report_id
+        LEFT JOIN ledger_integrity_checks c ON c.recon_run_id = r.id""";
 
   private static final TypeReference<Map<String, Difference>> DIFF = new TypeReference<>() {};
 
@@ -175,7 +177,13 @@ public class ReconRuns {
         summary == null ? null : fromJson(summary, new TypeReference<ReconSummary>() {}),
         rs.getString("error"),
         instant(rs, "created_at"),
-        instant(rs, "finished_at"));
+        instant(rs, "finished_at"),
+        rs.getObject("check_id") == null
+            ? null
+            : new ReconRun.LedgerIntegrity(
+                rs.getObject("check_id", UUID.class),
+                rs.getString("check_status"),
+                rs.getInt("violation_count")));
   }
 
   private ReconItem mapItem(ResultSet rs, int row) throws SQLException {
