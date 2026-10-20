@@ -17,7 +17,7 @@ public class WebConfig {
     return registration;
   }
 
-  /** Merchant API only; webhooks (HMAC), ops endpoints and actuator authenticate differently. */
+  /** Merchant API only; webhooks (HMAC), ops endpoints and metrics authenticate differently. */
   @Bean
   FilterRegistrationBean<ApiKeyAuthFilter> apiKeyAuthFilter(
       MerchantLookup merchants, ProblemWriter problems) {
@@ -27,12 +27,16 @@ public class WebConfig {
     return registration;
   }
 
-  /** Operations endpoints, with their own key: a merchant key never opens them. */
+  /**
+   * Operations endpoints, with their own key: a merchant key never opens them. Metrics too: they
+   * show internal state such as the ledger alarm, so Prometheus scrapes with the ops key as a
+   * bearer token. Health stays open for container probes.
+   */
   @Bean
   FilterRegistrationBean<OpsKeyAuthFilter> opsKeyAuthFilter(
       @Value("${ledgerpay.ops.api-key-hash:}") String apiKeyHash, ProblemWriter problems) {
     var registration = new FilterRegistrationBean<>(new OpsKeyAuthFilter(apiKeyHash, problems));
-    registration.addUrlPatterns("/ops/*");
+    registration.addUrlPatterns("/ops/*", "/actuator/prometheus");
     registration.setOrder(Ordered.HIGHEST_PRECEDENCE + 10);
     return registration;
   }

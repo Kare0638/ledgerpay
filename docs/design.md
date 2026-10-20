@@ -404,6 +404,20 @@ CREATE TABLE recon_items (
     diff              JSONB,               -- field-by-field differences
     PRIMARY KEY (run_id, item_no)
 );
+
+-- V10__ledger_integrity_checks.sql (#19), append-only
+CREATE TABLE ledger_integrity_checks (
+    id               UUID PRIMARY KEY,
+    trigger          TEXT        NOT NULL,   -- ON_DEMAND / RECON_RUN
+    recon_run_id     UUID        UNIQUE REFERENCES recon_runs(id),  -- one check per run
+    status           TEXT        NOT NULL,   -- PASSED / FAILED
+    snapshot_at      TIMESTAMPTZ NOT NULL,
+    journals         BIGINT      NOT NULL,
+    postings         BIGINT      NOT NULL,
+    violation_count  INT         NOT NULL,
+    violations       JSONB,                  -- [{check, subject, detail}], the first 1,000
+    checked_at       TIMESTAMPTZ NOT NULL DEFAULT now()
+);
 ```
 
 notification-service database (`notification`):
@@ -467,7 +481,9 @@ Every merchant write requires an `Idempotency-Key` header. A settlement report u
 | GET | `/ops/recon-runs/{id}`, `/ops/recon-runs?reportId=` | A run with its summary; every run of a report, oldest first | 200 | 404 |
 | GET | `/ops/recon-runs/{id}/items?category=&offset=&limit=` | Item-level breaks with their report lines, our operation and the diff; up to 1,000 a page | 200 | 400 / 404 |
 | POST | `/ops/psp-operations/{id}/inquiry` | Trigger a PSP status inquiry | 202 | 404 |
-| GET | `/actuator/health`, `/actuator/prometheus` | Health and metrics | 200 | |
+| POST | `/ops/ledger-integrity-checks` | Check the ledger against itself now (section 11.2) | 201, PASSED or FAILED | |
+| GET | `/ops/ledger-integrity-checks/{id}`, `/ops/ledger-integrity-checks?limit=` | One check with its violations; the latest checks | 200 | 400 / 404 |
+| GET | `/actuator/health`, `/actuator/prometheus` | Health (open) and metrics (ops key) | 200 | 401 for metrics without the ops key |
 
 A settlement upload names the business day; `psp` defaults to the configured provider (`mock-psp`). The response is the stored version: `reportId`, `psp`, `businessDate`, `version`, `status`, `rowCount`, `errorCount`, `errors`, `fileSha256`, `uploadedAt`. An INVALID file is still kept as a version (section 11.1), so the 400 `INVALID_CSV` problem carries its `reportId`, `version`, `rowCount`, `errorCount` and `errors`, each `{line, column, message}`. Uploading the same INVALID file again returns the same 400.
 
@@ -715,7 +731,20 @@ Matching is one-to-one on `psp_reference`, falling back to `psp_request_id`. Eve
 
 The primary category follows the order duplicate → unmatched → field conflict → status conflict, so every external row ends up in exactly one category, and so does every internal record the report must have (succeeded that day) or that a row was matched to; the counts are disjoint. Other operations in the snapshot are only candidates for matching. A row whose request ID leads to an operation another row already has is a DUPLICATE_EXTERNAL item of its own. Only the day of `succeeded_at` is compared, not the time. A run never sends inquiries itself (ADR 0007).
 
-A separate **ledger integrity check** runs regardless of the report: exactly one journal per successful capture or refund, every journal balanced, all postings sum to zero, and any balance cache agrees with postings. Any failure is a blocking alert.
+A separate **ledger integrity check** (`LedgerIntegrityCheck`, #19) runs regardless of the report, with every reconciliation run and on demand. It reads the whole ledger in one `REPEATABLE READ` read-only transaction and finds:
+
+| Violation | What it means |
+|---|---|
+| `MISSING_JOURNAL` | A succeeded capture or refund has no journal |
+| `UNEXPECTED_JOURNAL` | A journal books an operation that did not succeed, or is of another type |
+| `UNBALANCED_JOURNAL` | A journal has fewer than two postings, or its postings do not sum to zero |
+| `LEDGER_NOT_ZERO` | All postings in a currency do not sum to zero |
+| `JOURNAL_OPERATION_MISMATCH` | A journal, balanced or not, does not book exactly its operation's postings (section 5.5): the configured PSP's receivable by the amount, the merchant's own payable by its share and `fee_revenue` by the fee (recomputed from `fee_bps`, which never changes for a merchant), nothing to any other account, all in the operation's currency |
+| `PAYMENT_TOTALS_MISMATCH` | A payment's `captured_minor` or `refunded_minor` disagrees with its journals |
+
+There is no separate balance cache: balances are always summed from postings. The payment's captured and refunded amounts are the ledger's cache, kept in the money transaction, and the last check compares them with the postings. "At most one journal per operation" is a unique index, which nothing can bypass, so it is not re-checked. The database's triggers (V2) prevent the rest; the check finds what gets past them, such as a migration, a manual fix or a restore run with the triggers off.
+
+Each check is kept (`ledger_integrity_checks`, append-only, with the first 1,000 violations and the count), and a run shows the one that ran with it as `ledgerIntegrity`. A failed check does not fail the run, since the report still reconciles as it does, but it is a **blocking alert**: an error log, and `ledger_invariant_violations`, the latest stored check's count, read on every scrape so that every instance reports the same check, which an alert rule fires on above zero. A day whose report matches to the penny can still fail it (AT-19).
 
 ### 11.3 Results
 - Completed runs are **immutable**, items included; each item keeps our operation as the snapshot saw it. After a fix, a new run is created and old runs remain for comparison. A run renews `heartbeat_at` every fifth of `ledgerpay.recon.abandoned-after` (10 minutes) while it executes; one whose heartbeat is older than that was left by a dead process and is marked FAILED, and the report can simply be run again. A long run that is still at work is never swept. A run the executor refuses (shutdown) is FAILED at once.
@@ -791,7 +820,7 @@ Four single-fault report variants — duplicated P1 row, missing P3 row, P3 amou
 - `outbox_unpublished_events`, `outbox_publish_lag_seconds`
 - `refund_reserved_minor`
 - `recon_breaks{category}`, `recon_run_duration_seconds`
-- `ledger_invariant_violations` (must always be 0)
+- `ledger_invariant_violations` (must always be 0; served at `/actuator/prometheus` since #19, which needs the ops key as a bearer token, unlike `/actuator/health`), `ledger_integrity_checks_total{status}`
 
 **Dashboard:** throughput, p99 latency, error rate, oldest pending operation, outbox backlog, consumer lag, reconciliation breaks.
 

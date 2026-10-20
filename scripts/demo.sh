@@ -6,8 +6,8 @@
 #
 # It seeds merchant m_demo with a new API key and registers its webhook endpoint, then pays £100,
 # captures it, refunds £30 and checks each money effect: the ledger, the balance, the Kafka event,
-# the signed webhook the merchant received, and mock-psp's settlement report for the day, imported
-# and reconciled against the books.
+# the signed webhook the merchant received, mock-psp's settlement report for the day, imported and
+# reconciled against the books, and the ledger's integrity check.
 # Needs Docker with Compose v2, curl 7.76+ and bash 4.4+ (macOS ships 3.2: brew install bash).
 set -euo pipefail
 if (( BASH_VERSINFO[0] * 100 + BASH_VERSINFO[1] < 404 )); then
@@ -207,6 +207,14 @@ OURS=$(sql_value ledgerpay "SELECT count(*) FROM recon_items WHERE run_id = '$RU
                             AND category = 'MATCHED'
                             AND psp_reference IN ('$CAPTURE_REF', '$REFUND_REF')")
 (( OURS == EXPECTED_ROWS )) || fail "this payment's capture and refund should be MATCHED"
+
+step "Ledger integrity: the books against themselves, with the run and on demand"
+CHECK=$(http -X POST "$API/ops/ledger-integrity-checks" -H "Authorization: Bearer $OPS_KEY")
+echo "  $(field status "$CHECK"): $(field journals "$CHECK") journals, $(field postings "$CHECK") postings, $(field violationCount "$CHECK") violations"
+[[ $(field status "$CHECK") == PASSED ]] || fail "the ledger integrity check should pass"
+[[ $(sql_value ledgerpay "SELECT status FROM ledger_integrity_checks WHERE recon_run_id = '$RUN_ID'") == PASSED ]] \
+  || fail "the check that ran with the reconciliation should pass"
+http "$API/actuator/prometheus" -H "Authorization: Bearer $OPS_KEY" | grep '^ledger_invariant_violations ' | sed 's/^/  /'
 
 step "Done"
 cat <<EOF

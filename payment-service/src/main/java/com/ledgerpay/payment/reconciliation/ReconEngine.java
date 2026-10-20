@@ -1,5 +1,6 @@
 package com.ledgerpay.payment.reconciliation;
 
+import com.ledgerpay.payment.ledger.integrity.LedgerIntegrity;
 import com.ledgerpay.payment.settlement.SettlementReport;
 import com.ledgerpay.payment.settlement.SettlementReports;
 import com.ledgerpay.payment.settlement.SettlementRow;
@@ -36,6 +37,7 @@ public class ReconEngine {
   private final ExecutorService executor;
   private final ScheduledExecutorService heartbeat;
   private final Duration heartbeatInterval;
+  private final LedgerIntegrity integrity;
 
   public ReconEngine(
       ReconRuns runs,
@@ -44,7 +46,8 @@ public class ReconEngine {
       TransactionTemplate transactions,
       @Qualifier("reconExecutor") ExecutorService executor,
       @Qualifier("reconHeartbeat") ScheduledExecutorService heartbeat,
-      ReconProperties properties) {
+      ReconProperties properties,
+      LedgerIntegrity integrity) {
     this.runs = runs;
     this.reports = reports;
     this.books = books;
@@ -52,6 +55,7 @@ public class ReconEngine {
     this.executor = executor;
     this.heartbeat = heartbeat;
     this.heartbeatInterval = properties.heartbeatInterval();
+    this.integrity = integrity;
   }
 
   /** Starts a run of a VALID report; the caller has checked that it is one. */
@@ -83,6 +87,7 @@ public class ReconEngine {
           Reconciler.classify(report.businessDate(), rows, snapshot.operations());
       ReconSummary summary =
           Reconciler.summarise(report.businessDate(), rows, snapshot.operations(), items);
+      checkLedger(runId);
       boolean completed =
           Boolean.TRUE.equals(
               transactions.execute(
@@ -111,6 +116,19 @@ public class ReconEngine {
       runs.fail(runId, e.getClass().getSimpleName() + ": " + e.getMessage());
     } finally {
       beating.cancel(false);
+    }
+  }
+
+  /**
+   * The books against themselves, with every run (#19). Done before the run completes, so a
+   * COMPLETED run already shows it. A check that cannot run does not fail the reconciliation: its
+   * result is simply missing from the run, and the error is logged.
+   */
+  private void checkLedger(UUID runId) {
+    try {
+      integrity.runWithReconciliation(runId);
+    } catch (RuntimeException e) {
+      log.error("Ledger integrity check for recon run {} could not run", runId, e);
     }
   }
 
