@@ -15,7 +15,8 @@ CREATE TABLE ledger_integrity_checks (
     CHECK ((status = 'PASSED') = (violation_count = 0)),
     CHECK ((trigger = 'RECON_RUN') = (recon_run_id IS NOT NULL))
 );
-CREATE INDEX idx_ledger_integrity_checks_recon ON ledger_integrity_checks(recon_run_id);
+-- At most one check per run: a run's page joins it and expects one row at most.
+CREATE UNIQUE INDEX idx_ledger_integrity_checks_recon ON ledger_integrity_checks(recon_run_id);
 CREATE INDEX idx_ledger_integrity_checks_time ON ledger_integrity_checks(checked_at DESC);
 
 CREATE TRIGGER ledger_integrity_checks_append_only

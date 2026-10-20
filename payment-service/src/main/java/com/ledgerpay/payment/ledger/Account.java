@@ -18,8 +18,12 @@ import java.util.Objects;
  */
 public record Account(String id, AccountType type) {
 
-  private static final String PSP_RECEIVABLE = "psp_receivable:";
-  private static final String MERCHANT_PAYABLE = "merchant_payable:";
+  /** Prefix of a PSP's receivable; queries over many accounts match on it. */
+  public static final String PSP_RECEIVABLE = "psp_receivable:";
+
+  /** Prefix of a merchant's payable; queries over many accounts match on it. */
+  public static final String MERCHANT_PAYABLE = "merchant_payable:";
+
   private static final String FEE_REVENUE_ID = "fee_revenue";
 
   public static final Account FEE_REVENUE = new Account(FEE_REVENUE_ID, AccountType.REVENUE);

@@ -1,6 +1,8 @@
 package com.ledgerpay.payment.ledger.integrity;
 
+import com.ledgerpay.payment.ledger.Account;
 import com.ledgerpay.payment.ledger.integrity.Violation.Check;
+import com.ledgerpay.payment.psp.PspProperties;
 import java.time.Instant;
 import java.time.OffsetDateTime;
 import java.util.ArrayList;
@@ -27,9 +29,13 @@ public class LedgerIntegrityCheck {
 
   private final JdbcClient jdbc;
   private final TransactionTemplate snapshot;
+  private final String receivable;
 
-  public LedgerIntegrityCheck(JdbcClient jdbc, PlatformTransactionManager transactions) {
+  public LedgerIntegrityCheck(
+      JdbcClient jdbc, PlatformTransactionManager transactions, PspProperties psp) {
     this.jdbc = jdbc;
+    // Every payment goes through the one configured PSP, so its journals book that receivable.
+    this.receivable = Account.pspReceivable(psp.provider()).id();
     this.snapshot = new TransactionTemplate(transactions);
     this.snapshot.setIsolationLevel(TransactionDefinition.ISOLATION_REPEATABLE_READ);
     this.snapshot.setReadOnly(true);
@@ -147,44 +153,76 @@ public class LedgerIntegrityCheck {
         .forEach(violations::add);
   }
 
+  /**
+   * Each journal must book exactly the postings the money transaction makes for its operation
+   * (PostingRules): the amount to this PSP's receivable, the merchant's share to that merchant's
+   * own payable, the fee to fee_revenue, nothing to any other account, all in the operation's
+   * currency. A balanced journal that routes money elsewhere, all of it to fee_revenue say, is
+   * caught here. The fee is recomputed from the merchant's fee_bps, with the rounding of
+   * Fees.calculate; a merchant's rate is never changed, so it is the rate the capture used.
+   */
   private void journalOperationMismatches(List<Violation> violations) {
     jdbc.sql(
             """
-            SELECT j.id, j.entry_type, o.amount_minor, o.currency, pay.merchant_id,
-                   coalesce(sum(p.amount_minor)
-                       FILTER (WHERE starts_with(p.account_id, 'psp_receivable:')), 0) AS receivable,
-                   count(*) FILTER (WHERE starts_with(p.account_id, 'merchant_payable:')
-                       AND p.account_id <> 'merchant_payable:' || pay.merchant_id) AS other_merchant,
-                   count(*) FILTER (WHERE p.currency <> o.currency) AS other_currency
-              FROM journal_entries j
-              JOIN psp_operations o ON o.id = j.psp_operation_id
-              JOIN payments pay ON pay.id = o.payment_id
-              JOIN postings p ON p.entry_id = j.id
-             GROUP BY j.id, j.entry_type, o.amount_minor, o.currency, pay.merchant_id
-            HAVING coalesce(sum(p.amount_minor)
-                       FILTER (WHERE starts_with(p.account_id, 'psp_receivable:')), 0)
-                     <> CASE WHEN j.entry_type = 'CAPTURE' THEN o.amount_minor
-                             ELSE -o.amount_minor END
-                OR count(*) FILTER (WHERE starts_with(p.account_id, 'merchant_payable:')
-                       AND p.account_id <> 'merchant_payable:' || pay.merchant_id) > 0
-                OR count(*) FILTER (WHERE p.currency <> o.currency) > 0
-             ORDER BY j.id""")
+            WITH booked AS (
+                SELECT j.id, j.entry_type, o.amount_minor AS amount, o.currency, pay.merchant_id,
+                       :payablePrefix || pay.merchant_id AS payable_account,
+                       (o.amount_minor * m.fee_bps + 5000) / 10000 AS fee,
+                       coalesce(sum(p.amount_minor) FILTER (WHERE p.account_id = :receivable), 0)
+                           AS receivable,
+                       coalesce(sum(p.amount_minor)
+                           FILTER (WHERE p.account_id = :payablePrefix || pay.merchant_id), 0)
+                           AS payable,
+                       coalesce(sum(p.amount_minor) FILTER (WHERE p.account_id = :feeRevenue), 0)
+                           AS fee_revenue,
+                       string_agg(DISTINCT p.account_id, ', ' ORDER BY p.account_id)
+                           FILTER (WHERE p.account_id NOT IN
+                               (:receivable, :payablePrefix || pay.merchant_id, :feeRevenue))
+                           AS other_accounts,
+                       count(*) FILTER (WHERE p.currency <> o.currency) AS other_currency
+                  FROM journal_entries j
+                  JOIN psp_operations o ON o.id = j.psp_operation_id
+                  JOIN payments pay ON pay.id = o.payment_id
+                  JOIN merchants m ON m.id = pay.merchant_id
+                  JOIN postings p ON p.entry_id = j.id
+                 GROUP BY j.id, j.entry_type, o.amount_minor, o.currency, pay.merchant_id,
+                          m.fee_bps),
+            expected AS (
+                SELECT b.*,
+                       CASE b.entry_type WHEN 'CAPTURE' THEN b.amount ELSE -b.amount END
+                           AS expected_receivable,
+                       CASE b.entry_type WHEN 'CAPTURE' THEN -(b.amount - b.fee) ELSE b.amount END
+                           AS expected_payable,
+                       CASE b.entry_type WHEN 'CAPTURE' THEN -b.fee ELSE 0 END AS expected_fee
+                  FROM booked b)
+            SELECT * FROM expected
+             WHERE receivable <> expected_receivable
+                OR payable <> expected_payable
+                OR fee_revenue <> expected_fee
+                OR other_accounts IS NOT NULL
+                OR other_currency > 0
+             ORDER BY id""")
+        .param("receivable", receivable)
+        .param("payablePrefix", Account.MERCHANT_PAYABLE)
+        .param("feeRevenue", Account.FEE_REVENUE.id())
         .query(
             (rs, row) -> {
-              long amount = rs.getLong("amount_minor");
-              long expected = rs.getString("entry_type").equals("CAPTURE") ? amount : -amount;
               List<String> found = new ArrayList<>();
-              if (rs.getLong("receivable") != expected) {
+              moved(
+                  found,
+                  "PSP receivable",
+                  rs.getLong("receivable"),
+                  rs.getLong("expected_receivable"));
+              moved(
+                  found,
+                  "merchant " + rs.getString("merchant_id") + " payable",
+                  rs.getLong("payable"),
+                  rs.getLong("expected_payable"));
+              moved(found, "fee revenue", rs.getLong("fee_revenue"), rs.getLong("expected_fee"));
+              if (rs.getString("other_accounts") != null) {
                 found.add(
-                    "PSP receivable moved by "
-                        + rs.getLong("receivable")
-                        + ", expected "
-                        + expected);
-              }
-              if (rs.getLong("other_merchant") > 0) {
-                found.add(
-                    "merchant share posted to a merchant other than "
-                        + rs.getString("merchant_id"));
+                    "posted to accounts outside the operation's: "
+                        + rs.getString("other_accounts"));
               }
               if (rs.getLong("other_currency") > 0) {
                 found.add("postings not in the operation's " + rs.getString("currency"));
@@ -198,6 +236,12 @@ public class LedgerIntegrityCheck {
         .forEach(violations::add);
   }
 
+  private static void moved(List<String> found, String account, long actual, long expected) {
+    if (actual != expected) {
+      found.add(account + " moved by " + actual + ", expected " + expected);
+    }
+  }
+
   private void paymentTotals(List<Violation> violations) {
     jdbc.sql(
             """
@@ -209,8 +253,7 @@ public class LedgerIntegrityCheck {
                            AS refunded
                   FROM journal_entries j
                   JOIN psp_operations o ON o.id = j.psp_operation_id
-                  JOIN postings p ON p.entry_id = j.id
-                                 AND starts_with(p.account_id, 'psp_receivable:')
+                  JOIN postings p ON p.entry_id = j.id AND p.account_id = :receivable
                  GROUP BY o.payment_id)
             SELECT pay.id, pay.captured_minor, pay.refunded_minor,
                    coalesce(b.captured, 0) AS booked_captured,
@@ -219,6 +262,7 @@ public class LedgerIntegrityCheck {
              WHERE pay.captured_minor <> coalesce(b.captured, 0)
                 OR pay.refunded_minor <> coalesce(b.refunded, 0)
              ORDER BY pay.id""")
+        .param("receivable", receivable)
         .query(
             (rs, row) ->
                 new Violation(

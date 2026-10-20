@@ -66,8 +66,16 @@ public class IntegrityChecks {
         .list();
   }
 
-  public Optional<IntegrityCheck> forReconRun(UUID runId) {
-    return jdbc.sql(SELECT + " WHERE recon_run_id = ?").param(runId).query(this::map).optional();
+  /**
+   * The violation count of the latest stored check, by any instance; one indexed row, cheap enough
+   * for every metrics scrape.
+   */
+  public Optional<Integer> latestViolationCount() {
+    return jdbc.sql(
+            "SELECT violation_count FROM ledger_integrity_checks"
+                + " ORDER BY checked_at DESC, id LIMIT 1")
+        .query(Integer.class)
+        .optional();
   }
 
   private IntegrityCheck map(ResultSet rs, int row) throws SQLException {

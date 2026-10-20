@@ -15,9 +15,9 @@ import org.springframework.stereotype.Service;
  * Runs ledger integrity checks, keeps each result and raises the alarm (design §11.2, #19). A
  * failed check is a blocking alert: an error log naming the first violations, and the gauge {@code
  * ledger_invariant_violations}, the violation count of the latest check, which an alert rule fires
- * on when it is above zero. Before the first check of a process the gauge is the latest stored
- * check's count, read on the first scrape (not at startup, which should not need the database), or
- * NaN when there is none.
+ * on when it is above zero. The gauge reads the latest stored check on every scrape, so every
+ * instance reports the same check, whichever instance ran it; NaN when there is none yet. It never
+ * keeps a count of its own that could go stale or be overwritten by an older read.
  */
 @Service
 public class LedgerIntegrity {
@@ -30,8 +30,9 @@ public class LedgerIntegrity {
   private final Clock clock;
   private final Counter passed;
   private final Counter failed;
-  private volatile double latestViolations = Double.NaN;
-  private volatile boolean known;
+
+  /** The last count read, reported while the database cannot be reached. */
+  private volatile double lastRead = Double.NaN;
 
   public LedgerIntegrity(
       LedgerIntegrityCheck check, IntegrityChecks checks, Clock clock, MeterRegistry meters) {
@@ -52,18 +53,14 @@ public class LedgerIntegrity {
         .register(meters);
   }
 
-  /** The latest count; on the first read without a check yet, the latest stored one. */
+  /** The latest stored check's count; if the database is unreachable, the last one read. */
   private double gauge() {
-    if (!known) {
-      known = true;
-      try {
-        checks.latest(1).stream().findFirst().ifPresent(c -> latestViolations = c.violationCount());
-      } catch (RuntimeException e) {
-        known = false;
-        log.warn("Could not read the latest ledger integrity check: {}", e.getMessage());
-      }
+    try {
+      lastRead = checks.latestViolationCount().map(Integer::doubleValue).orElse(Double.NaN);
+    } catch (RuntimeException e) {
+      log.warn("Could not read the latest ledger integrity check: {}", e.getMessage());
     }
-    return latestViolations;
+    return lastRead;
   }
 
   public IntegrityCheck runOnDemand() {
@@ -90,8 +87,6 @@ public class LedgerIntegrity {
             violations.subList(0, Math.min(violations.size(), MAX_STORED_VIOLATIONS)),
             clock.instant().truncatedTo(ChronoUnit.MICROS));
     checks.insert(stored);
-    latestViolations = violations.size();
-    known = true;
     if (result.passed()) {
       passed.increment();
       log.info(

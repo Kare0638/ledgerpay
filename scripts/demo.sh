@@ -214,7 +214,7 @@ echo "  $(field status "$CHECK"): $(field journals "$CHECK") journals, $(field p
 [[ $(field status "$CHECK") == PASSED ]] || fail "the ledger integrity check should pass"
 [[ $(sql_value ledgerpay "SELECT status FROM ledger_integrity_checks WHERE recon_run_id = '$RUN_ID'") == PASSED ]] \
   || fail "the check that ran with the reconciliation should pass"
-http "$API/actuator/prometheus" | grep '^ledger_invariant_violations ' | sed 's/^/  /'
+http "$API/actuator/prometheus" -H "Authorization: Bearer $OPS_KEY" | grep '^ledger_invariant_violations ' | sed 's/^/  /'
 
 step "Done"
 cat <<EOF

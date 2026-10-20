@@ -1,6 +1,7 @@
 package com.ledgerpay.payment.ledger.integrity;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.awaitility.Awaitility.await;
 
 import com.fasterxml.jackson.databind.JsonNode;
@@ -31,6 +32,7 @@ import org.springframework.boot.test.system.CapturedOutput;
 import org.springframework.boot.test.system.OutputCaptureExtension;
 import org.springframework.boot.test.web.server.LocalServerPort;
 import org.springframework.boot.testcontainers.service.connection.ServiceConnection;
+import org.springframework.dao.DuplicateKeyException;
 import org.springframework.jdbc.core.simple.JdbcClient;
 import org.springframework.transaction.support.TransactionTemplate;
 import org.testcontainers.containers.PostgreSQLContainer;
@@ -300,6 +302,9 @@ class LedgerIntegrityIntegrationTest {
         .isEqualTo("captured 5000 and refunded 0, but the journals book 0 and 0");
     assertThat(gauge()).isEqualTo("ledger_invariant_violations 2.0");
     assertThat(output).contains("LEDGER INTEGRITY CHECK", "FAILED with 2 violation(s)");
+    // One check per run: a second would break the run's page, which joins it.
+    assertThatThrownBy(() -> insertCheck(UUID.fromString(runId), 0))
+        .isInstanceOf(DuplicateKeyException.class);
   }
 
   /** AT-19: a corrupted cache of the ledger, a payment's captured amount. */
@@ -355,7 +360,10 @@ class LedgerIntegrityIntegrationTest {
     assertThat(checks(check))
         .containsExactly("JOURNAL_OPERATION_MISMATCH", "PAYMENT_TOTALS_MISMATCH");
     assertThat(check.path("violations").get(0).path("detail").asText())
-        .isEqualTo("PSP receivable moved by 10100, expected 10000");
+        .isEqualTo(
+            "PSP receivable moved by 10100, expected 10000; merchant "
+                + capture.merchant()
+                + " payable moved by -10000, expected -9900");
   }
 
   @Test
@@ -374,7 +382,125 @@ class LedgerIntegrityIntegrationTest {
 
     assertThat(checks(check)).containsExactly("JOURNAL_OPERATION_MISMATCH");
     assertThat(check.path("violations").get(0).path("detail").asText())
-        .isEqualTo("merchant share posted to a merchant other than " + capture.merchant());
+        .isEqualTo(
+            "merchant "
+                + capture.merchant()
+                + " payable moved by 0, expected -9900; posted to accounts outside the"
+                + " operation's: merchant_payable:"
+                + other);
+  }
+
+  /**
+   * Balanced, the receivable right and no other merchant touched, yet the merchant is owed nothing:
+   * the whole capture went to fee revenue.
+   */
+  @Test
+  void aBalancedJournalThatRoutesTheMerchantsShareToFeesIsCaught() throws Exception {
+    Booked capture = capture(merchant(), 10000);
+    corrupt(
+        "DELETE FROM postings WHERE entry_id = '"
+            + capture.journalId()
+            + "' AND starts_with(account_id, 'merchant_payable:')",
+        "UPDATE postings SET amount_minor = -10000 WHERE entry_id = '"
+            + capture.journalId()
+            + "' AND account_id = 'fee_revenue'");
+
+    JsonNode check = check();
+
+    assertThat(checks(check)).containsExactly("JOURNAL_OPERATION_MISMATCH");
+    assertThat(check.path("violations").get(0).path("detail").asText())
+        .isEqualTo(
+            "merchant "
+                + capture.merchant()
+                + " payable moved by 0, expected -9900; fee revenue moved by -10000, expected"
+                + " -100");
+  }
+
+  /** Our receivable is the configured PSP's; another PSP's receivable is the wrong account. */
+  @Test
+  void aCaptureBookedToAnotherPspsReceivableIsCaught() throws Exception {
+    Booked capture = capture(merchant(), 10000);
+    jdbc.sql(
+            "INSERT INTO accounts (id, type, currency) VALUES ('psp_receivable:other-psp',"
+                + " 'ASSET', 'GBP') ON CONFLICT DO NOTHING")
+        .update();
+    corrupt(
+        "UPDATE postings SET account_id = 'psp_receivable:other-psp' WHERE entry_id = '"
+            + capture.journalId()
+            + "' AND account_id = 'psp_receivable:"
+            + PSP
+            + "'");
+
+    JsonNode check = check();
+
+    assertThat(checks(check))
+        .containsExactly("JOURNAL_OPERATION_MISMATCH", "PAYMENT_TOTALS_MISMATCH");
+    assertThat(check.path("violations").get(0).path("detail").asText())
+        .isEqualTo(
+            "PSP receivable moved by 0, expected 10000; posted to accounts outside the"
+                + " operation's: psp_receivable:other-psp");
+  }
+
+  /** A check stored as another instance would, after this one's own. */
+  void insertCheck(UUID reconRunId, int violations) {
+    jdbc.sql(
+            """
+            INSERT INTO ledger_integrity_checks
+                   (id, trigger, recon_run_id, status, snapshot_at, journals, postings,
+                    violation_count, violations, checked_at)
+            VALUES (?, ?, ?, ?, now(), 0, 0, ?, ?::jsonb, now() + interval '1 second')""")
+        .params(
+            UUID.randomUUID(),
+            reconRunId == null ? "ON_DEMAND" : "RECON_RUN",
+            reconRunId,
+            violations == 0 ? "PASSED" : "FAILED",
+            violations,
+            violations == 0 ? null : "[]")
+        .update();
+  }
+
+  /**
+   * The gauge is the latest stored check, whichever instance ran it: a failure recorded elsewhere
+   * raises it here, and a later pass elsewhere clears it.
+   */
+  @Test
+  void theGaugeFollowsTheLatestStoredCheckFromAnyInstance() throws Exception {
+    capture(merchant(), 100);
+    check();
+    assertThat(gauge()).isEqualTo("ledger_invariant_violations 0.0");
+
+    insertCheck(null, 7);
+    assertThat(gauge()).isEqualTo("ledger_invariant_violations 7.0");
+
+    Thread.sleep(1_100);
+    insertCheck(null, 0);
+    assertThat(gauge()).isEqualTo("ledger_invariant_violations 0.0");
+  }
+
+  /** Metrics show internal state, the ledger alarm included: they need the ops key. */
+  @Test
+  void metricsNeedTheOpsKeyButHealthDoesNot() throws Exception {
+    var noKey =
+        http.send(
+            HttpRequest.newBuilder(URI.create("http://localhost:" + port + "/actuator/prometheus"))
+                .build(),
+            HttpResponse.BodyHandlers.ofString());
+    var wrongKey =
+        http.send(
+            HttpRequest.newBuilder(URI.create("http://localhost:" + port + "/actuator/prometheus"))
+                .header("Authorization", "Bearer mk_merchant_key")
+                .build(),
+            HttpResponse.BodyHandlers.ofString());
+    var health =
+        http.send(
+            HttpRequest.newBuilder(URI.create("http://localhost:" + port + "/actuator/health"))
+                .build(),
+            HttpResponse.BodyHandlers.ofString());
+
+    assertThat(noKey.statusCode()).isEqualTo(401);
+    assertThat(wrongKey.statusCode()).isEqualTo(401);
+    assertThat(health.statusCode()).isEqualTo(200);
+    assertThat(send("GET", "/actuator/prometheus", null).status()).isEqualTo(200);
   }
 
   @Test
