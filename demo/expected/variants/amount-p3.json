@@ -1,0 +1,8 @@
+{
+  "description": "The PSP lists P3 at 5100 against our 5000: AMOUNT_MISMATCH with the field-level diff; our amount is never overwritten",
+  "items": {"P1": "MATCHED", "R1": "MATCHED", "P2": "MATCHED", "P3": "AMOUNT_MISMATCH"},
+  "categories": {"MATCHED": 3, "AMOUNT_MISMATCH": 1},
+  "external": {"capturedMinor": 35100, "refundedMinor": 3000, "netMinor": 32100},
+  "internal": {"capturedMinor": 35000, "refundedMinor": 3000, "netMinor": 32000},
+  "diffs": {"P3": {"amount_minor": {"external": 5100, "internal": 5000}}}
+}

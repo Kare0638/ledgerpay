@@ -1,0 +1,7 @@
+{
+  "description": "P3's row is missing: we booked it that day and the PSP does not list it, MISSING_EXTERNAL",
+  "items": {"P1": "MATCHED", "R1": "MATCHED", "P2": "MATCHED", "P3": "MISSING_EXTERNAL"},
+  "categories": {"MATCHED": 3, "MISSING_EXTERNAL": 1},
+  "external": {"capturedMinor": 30000, "refundedMinor": 3000, "netMinor": 27000},
+  "internal": {"capturedMinor": 35000, "refundedMinor": 3000, "netMinor": 32000}
+}

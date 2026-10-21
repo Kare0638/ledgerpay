@@ -1,0 +1,7 @@
+{
+  "description": "The report has a £15 capture we have no record of: MISSING_INTERNAL, kept for investigation and never booked from the report",
+  "items": {"P1": "MATCHED", "R1": "MATCHED", "P2": "MATCHED", "P3": "MATCHED", "UNKNOWN": "MISSING_INTERNAL"},
+  "categories": {"MATCHED": 4, "MISSING_INTERNAL": 1},
+  "external": {"capturedMinor": 36500, "refundedMinor": 3000, "netMinor": 33500},
+  "internal": {"capturedMinor": 35000, "refundedMinor": 3000, "netMinor": 32000}
+}

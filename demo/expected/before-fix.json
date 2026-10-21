@@ -1,0 +1,7 @@
+{
+  "description": "The day's report against the books while P2's capture webhook is lost: P2 is a STATUS_MISMATCH, everything else matches",
+  "items": {"P1": "MATCHED", "R1": "MATCHED", "P2": "STATUS_MISMATCH", "P3": "MATCHED"},
+  "categories": {"MATCHED": 3, "STATUS_MISMATCH": 1},
+  "external": {"capturedMinor": 35000, "refundedMinor": 3000, "netMinor": 32000},
+  "internal": {"capturedMinor": 15000, "refundedMinor": 3000, "netMinor": 12000}
+}

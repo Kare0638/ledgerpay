@@ -805,7 +805,7 @@ The settlement report has four rows: P1, R1, P2, P3. The first run shows STATUS_
 
 The ledger has four journals. Normal-balance view: receivable **32000** = merchant payable **31650** + fee revenue **350**. P4 has no journal and is not in the report.
 
-Four single-fault report variants — duplicated P1 row, missing P3 row, P3 amount 5100, an unknown transaction — each ship with their own expected-result file.
+Four single-fault report variants — duplicated P1 row, missing P3 row, P3 amount 5100, an unknown transaction — each ship with their own expected-result file. [`demo/run.sh`](../demo/README.md) plays the day through the API and mock-psp's faults (`DROP_WEBHOOK` for P2, `DECLINE` for P4) on a stack of its own. It adds two scenes that leave the numbers unchanged: two concurrent refunds of P1, one refused with 409 and the other declined by the PSP, and P3's outcome delivered twelve times. Each run, the variants included, is compared with its file in `demo/expected/`.
 
 ---
 

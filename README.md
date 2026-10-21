@@ -28,7 +28,7 @@ Acceptance tests from the [design's list](docs/design.md): all 19 pass, AT-01 to
 
 | Milestone | What | Issues |
 |---|---|---|
-| M3: reconciliation and observability | Property-based ledger tests, demo data set with report variants | #20, #21 |
+| M3: reconciliation and observability | Property-based ledger tests; a recorded walkthrough of the reconciliation demo | #20, #21 |
 | | Metrics, Grafana dashboard, alert rules, structured logs | #22 |
 | M4: performance and cloud | Published k6 results, Terraform for ECS Fargate and RDS | #23, #24 |
 | Optional | An LLM assistant that drafts analyses of reconciliation breaks; SQS/SNS adapter | #26, #25 |
@@ -73,6 +73,14 @@ scripts/demo.sh
 - the ledger integrity check passes, both the one that ran with the reconciliation and one run on demand.
 
 It stops with `FAILED` on the first mismatch. The first build downloads Maven dependencies and takes a few minutes. `scripts/demo.sh --fresh` first deletes the stack's volumes, for a database left by an older checkout.
+
+### The reconciliation demo
+
+```bash
+demo/run.sh
+```
+
+One merchant's day with a real break ([`demo/`](demo/README.md)). P1 £100 is captured and £30 of it refunded, and two concurrent refunds then show one 409. P2's £200 capture webhook is lost, P3's outcome arrives twelve times, and P4 is declined. Reconciling mock-psp's report finds P2 as a `STATUS_MISMATCH`. An inquiry books it, and a second run is all `MATCHED`: captures 35000, refunds 3000, net 32000, and receivable 32000 = payable 31650 + revenue 350. Four single-fault variants of the report follow (duplicate row, missing row, amount 5100, unknown transaction). Every result is checked against a file in [`demo/expected/`](demo/expected/). It runs on a stack of its own, so stop the main one first.
 
 ### The same flow by hand
 
