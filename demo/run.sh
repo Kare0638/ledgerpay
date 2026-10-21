@@ -7,7 +7,9 @@
 #   demo/run.sh --pause    wait for Enter before each step, for a recorded walkthrough
 #
 # It runs its own Compose project, ledgerpay-recon-demo, on fresh volumes each time, so the day's
-# settlement report holds only this story. Stop the main stack first if it is up: both use the
+# settlement report holds only this story. The name is fixed, never taken from the environment:
+# the script deletes this project's volumes, and an inherited COMPOSE_PROJECT_NAME could name the
+# main stack's. Stop the main stack first if it is up: both use the
 # same ports. Needs Docker with Compose v2, curl 7.76+ and bash 4.4+.
 #
 #   P1  £100 captured, then R1 £30 refunded; two more refunds at once: one 409, one declined
@@ -15,7 +17,7 @@
 #   P3  £50 captured, the outcome delivered 12 times (DUPLICATE_WEBHOOK)
 #   P4  £40 authorisation declined (DECLINE)
 cd "$(dirname "$0")/.."
-export COMPOSE_PROJECT_NAME=${COMPOSE_PROJECT_NAME:-ledgerpay-recon-demo}
+export COMPOSE_PROJECT_NAME=ledgerpay-recon-demo
 COMPOSE=(docker compose -f infra/docker-compose.yml)
 [[ ${1:-} == --pause ]] && PAUSE=true
 source scripts/lib.sh
@@ -47,6 +49,14 @@ capture() {
     -H "Idempotency-Key: capture-$1" > /dev/null
 }
 
+# A refund that must be accepted: stops with the Problem otherwise. Prints the response.
+refund_accepted() {
+  local ref="refund-$(random_hex)"
+  http -X POST "$API/v1/payments/$1/refunds" \
+    -H "Authorization: Bearer $KEY" -H "Idempotency-Key: $ref" -H 'Content-Type: application/json' \
+    -d "{\"merchantReference\":\"$ref\",\"amountMinor\":$2,\"reason\":\"$3\"}"
+}
+
 # Starts a refund; prints the HTTP status and the body, without failing on a 409.
 refund() {
   local ref="refund-$(random_hex)"
@@ -67,13 +77,18 @@ journals() {
                        JOIN psp_operations o ON o.id = j.psp_operation_id WHERE o.payment_id = '$1'"
 }
 
-# Waits for the run to finish and prints its id.
+# Waits for the run to finish and prints its id. A request is assigned before it is parsed: a failure
+# inside $(...) passed as an argument would not stop the script, only one assigned does.
 run_report() {
-  local run status
-  run=$(field runId "$(ops -X POST "$API/ops/recon-runs" -H 'Content-Type: application/json' \
-    -d "{\"reportId\":\"$1\"}")")
+  local body run status
+  [[ -n $1 ]] || fail "no report to reconcile"
+  body=$(ops -X POST "$API/ops/recon-runs" -H 'Content-Type: application/json' \
+    -d "{\"reportId\":\"$1\"}")
+  run=$(field runId "$body")
+  [[ -n $run ]] || fail "no runId in $body"
   for _ in $(seq 1 30); do
-    status=$(field status "$(ops "$API/ops/recon-runs/$run")")
+    body=$(ops "$API/ops/recon-runs/$run")
+    status=$(field status "$body")
     [[ $status != RUNNING ]] && break
     sleep 1
   done
@@ -158,7 +173,9 @@ P1=$(pay p1 10000)
 wait_for_status "$API/v1/payments/$P1" AUTHORIZED
 capture "$P1"
 wait_for_status "$API/v1/payments/$P1" CAPTURED
-R1_ID=$(field refundId "$(refund "$P1" 3000 returned | head -n 1)")
+R1=$(refund_accepted "$P1" 3000 returned)
+R1_ID=$(field refundId "$R1")
+[[ -n $R1_ID ]] || fail "no refundId in $R1"
 wait_for_status "$API/v1/refunds/$R1_ID" SUCCEEDED
 
 step "Two more refunds of P1 at once, £50 and £40, with £70 left: the reservation lets only one in"
@@ -182,17 +199,24 @@ P2=$(pay p2 20000)
 wait_for_status "$API/v1/payments/$P2" AUTHORIZED
 fault CAPTURE DROP_WEBHOOK
 capture "$P2"
+P2_AT_PSP=
 for _ in $(seq 1 30); do
   P2_REF=$(sql_value ledgerpay "SELECT psp_reference FROM psp_operations
                                 WHERE payment_id = '$P2' AND type = 'CAPTURE'")
-  [[ -n $P2_REF && $(sql_value mockpsp "SELECT status FROM operations
-                                        WHERE psp_reference = '$P2_REF'") == SUCCEEDED ]] && break
+  if [[ -n $P2_REF ]]; then
+    P2_AT_PSP=$(sql_value mockpsp "SELECT status FROM operations WHERE psp_reference = '$P2_REF'")
+    [[ $P2_AT_PSP == SUCCEEDED ]] && break
+  fi
   sleep 1
 done
+# Without this, "pending here" below would pass just as well if the PSP had done nothing.
+[[ $P2_AT_PSP == SUCCEEDED ]] || fail "mock-psp should have P2's capture SUCCEEDED after 30 s, not '$P2_AT_PSP'"
 sleep 2
-[[ $(field status "$(http "$API/v1/payments/$P2" -H "Authorization: Bearer $KEY")") == CAPTURE_PENDING ]] \
-  || fail "P2 should still be CAPTURE_PENDING"
-ok "mock-psp: SUCCEEDED. Ours: CAPTURE_PENDING, no journal ($(journals "$P2"))"
+P2_VIEW=$(http "$API/v1/payments/$P2" -H "Authorization: Bearer $KEY")
+[[ $(field status "$P2_VIEW") == CAPTURE_PENDING ]] || fail "P2 should still be CAPTURE_PENDING: $P2_VIEW"
+P2_JOURNALS=$(journals "$P2")
+[[ $P2_JOURNALS == 0 ]] || fail "P2 should have no journal yet, has $P2_JOURNALS"
+ok "mock-psp: SUCCEEDED. Ours: CAPTURE_PENDING, no journal"
 
 step "P3: £50 captured, the outcome sent 12 times"
 P3=$(pay p3 5000)
@@ -201,25 +225,35 @@ fault CAPTURE DUPLICATE_WEBHOOK
 capture "$P3"
 wait_for_status "$API/v1/payments/$P3" CAPTURED
 P3_REF=$(reference "$P3" CAPTURE)
+[[ -n $P3_REF ]] || fail "P3's capture has no PSP reference"
 for _ in $(seq 1 30); do
   SENT=$(sql_value mockpsp "SELECT coalesce(sum(copies), 0) FROM webhook_events
                             WHERE psp_reference = '$P3_REF' AND delivered_at IS NOT NULL")
   (( SENT >= 12 )) && break
   sleep 1
 done
+(( SENT >= 12 )) || fail "mock-psp should have delivered P3's outcome 12 times after 30 s, not $SENT"
 EVENTS=$(sql_value ledgerpay "SELECT count(*) FROM inbox_events
                               WHERE payload ->> 'psp_reference' = '$P3_REF'")
-[[ $(journals "$P3") == 1 ]] || fail "P3 should have one journal"
+# AT-07: one event ten times and the same outcome under two more IDs are three inbox rows.
+[[ $EVENTS == 3 ]] || fail "the inbox should hold 3 distinct event IDs for P3, not $EVENTS"
+P3_JOURNALS=$(journals "$P3")
+[[ $P3_JOURNALS == 1 ]] || fail "P3 should have one journal, has $P3_JOURNALS"
 ok "$SENT deliveries, $EVENTS distinct event IDs in the inbox, 1 journal"
 
 step "P4: £40, the authorisation declined"
 fault AUTHORIZE DECLINE
 P4=$(pay p4 4000)
 wait_for_status "$API/v1/payments/$P4" DECLINED
-ok "DECLINED, no journal ($(journals "$P4")); it moved no money, so it is not in the report"
+P4_JOURNALS=$(journals "$P4")
+[[ $P4_JOURNALS == 0 ]] || fail "P4 should have no journal, has $P4_JOURNALS"
+ok "DECLINED, no journal; it moved no money, so it is not in the report"
 
+P1_REF=$(reference "$P1" CAPTURE)
+R1_REF=$(reference "$P1" REFUND)
+[[ -n $P1_REF && -n $R1_REF ]] || fail "P1's capture and R1 should both have succeeded"
 LABELS=$(printf '{"P1":"%s","R1":"%s","P2":"%s","P3":"%s","UNKNOWN":"psp_demo_unknown"}' \
-  "$(reference "$P1" CAPTURE)" "$(reference "$P1" REFUND)" "$P2_REF" "$P3_REF")
+  "$P1_REF" "$R1_REF" "$P2_REF" "$P3_REF")
 DAY=$(sql_value mockpsp "SELECT DISTINCT to_char(succeeded_at AT TIME ZONE 'UTC', 'YYYY-MM-DD')
                          FROM operations WHERE type IN ('CAPTURE', 'REFUND') AND status = 'SUCCEEDED'")
 [[ $DAY =~ ^[0-9-]{10}$ ]] || fail "the story ran across midnight UTC ($DAY); run it again"
@@ -264,7 +298,7 @@ ok "ledger integrity check with run 2: PASSED"
 
 step "Four single-fault variants of the report, each reconciled against the fixed books"
 LINE() { grep "^$1," "$WORK/report.csv"; }
-P1_LINE=$(LINE "$(reference "$P1" CAPTURE)")
+P1_LINE=$(LINE "$P1_REF")
 P3_LINE=$(LINE "$P3_REF")
 { cat "$WORK/report.csv"; printf '%s\n' "$P1_LINE"; } > "$WORK/duplicate-p1.csv"
 grep -v "^$P3_REF," "$WORK/report.csv" > "$WORK/missing-p3.csv"
@@ -275,7 +309,9 @@ sed "s/^\($P3_REF,.*\),5000,GBP,/\1,5100,GBP,/" "$WORK/report.csv" > "$WORK/amou
 for variant in duplicate-p1 missing-p3 amount-p3 unknown-transaction; do
   file="$EXPECTED/variants/$variant.json"
   say "$variant: $(sed -n 's/.*"description": "\([^"]*\)".*/\1/p' "$file")"
-  check_run "$(run_report "$(upload "$WORK/$variant.csv")")" "$file"
+  variant_report=$(upload "$WORK/$variant.csv")
+  variant_run=$(run_report "$variant_report")
+  check_run "$variant_run" "$file"
 done
 
 step "Done"
