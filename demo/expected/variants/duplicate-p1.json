@@ -1,0 +1,7 @@
+{
+  "description": "P1's row appears twice: the whole group is one DUPLICATE_EXTERNAL break, and no row of it is picked to match",
+  "items": {"P1": "DUPLICATE_EXTERNAL", "R1": "MATCHED", "P2": "MATCHED", "P3": "MATCHED"},
+  "categories": {"MATCHED": 3, "DUPLICATE_EXTERNAL": 1},
+  "external": {"capturedMinor": 45000, "refundedMinor": 3000, "netMinor": 42000},
+  "internal": {"capturedMinor": 35000, "refundedMinor": 3000, "netMinor": 32000}
+}

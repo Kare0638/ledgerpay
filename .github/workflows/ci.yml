@@ -62,3 +62,19 @@ jobs:
       - name: Service logs
         if: failure()
         run: docker compose -f infra/docker-compose.yml logs --no-color --tail 200
+
+  # The reconciliation story on a stack of its own (#21): a lost webhook found, fixed by inquiry,
+  # and four report variants, each checked against demo/expected/.
+  recon-demo:
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Run the reconciliation demo
+        run: demo/run.sh
+
+      - name: Service logs
+        if: failure()
+        run: docker compose -p ledgerpay-recon-demo -f infra/docker-compose.yml logs --no-color --tail 200
