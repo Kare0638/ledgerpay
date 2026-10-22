@@ -56,7 +56,8 @@ import org.testcontainers.containers.PostgreSQLContainer;
  * <ul>
  *   <li>the ledger integrity check passes: one balanced journal per settled operation, each booking
  *       exactly its operation, every currency summing to zero, payment totals equal to journals;
- *   <li>refunded + reserved ≤ captured, and nothing is left reserved once every outcome is in;
+ *   <li>refunded + reserved ≤ captured as the service reports it, checked while two refunds are
+ *       accepted but not yet settled, and nothing is left reserved once every outcome is in;
  *   <li>every answer, status, journal count and the merchant's balance are what a simple model of
  *       the history predicts.
  * </ul>
@@ -233,7 +234,6 @@ class PaymentHistoryPropertyTest {
     assertThat(view.path("capturedMinor").asLong()).as("captured").isEqualTo(model.captured());
     assertThat(view.path("refundedMinor").asLong()).as("refunded").isEqualTo(model.refunded);
     assertThat(view.path("refundReservedMinor").asLong()).as("left reserved").isZero();
-    assertThat(model.refunded).isLessThanOrEqualTo(model.captured());
     assertThat(
             jdbc.sql(
                     """
@@ -311,7 +311,12 @@ class PaymentHistoryPropertyTest {
     Response a = first.join();
     Response b = second.join();
     if (!model.status.equals("CAPTURED")) {
-      assertThat(List.of(a.status(), b.status())).containsOnly(409);
+      assertThat(List.of(a, b))
+          .allSatisfy(
+              refused -> {
+                assertThat(refused.status()).isEqualTo(409);
+                assertThat(refused.code()).isEqualTo("INVALID_STATE");
+              });
       concurrency.add("not captured");
       return;
     }
@@ -337,6 +342,18 @@ class PaymentHistoryPropertyTest {
         assertThat(refused.code()).isEqualTo("REFUND_AMOUNT_EXCEEDED");
       }
     }
+    // Both answered, neither settled: the service holds exactly the accepted amounts in reserve,
+    // and refunded + reserved stays within captured. Read from the service, not the model.
+    long accepted =
+        (a.status() == 202 ? both.first() : 0) + (b.status() == 202 ? both.second() : 0);
+    JsonNode inFlight = get("/v1/payments/" + payment);
+    assertThat(inFlight.path("refundReservedMinor").asLong())
+        .as("reserved while in flight")
+        .isEqualTo(accepted);
+    assertThat(
+            inFlight.path("refundedMinor").asLong() + inFlight.path("refundReservedMinor").asLong())
+        .as("refunded + reserved")
+        .isLessThanOrEqualTo(inFlight.path("capturedMinor").asLong());
     if (a.status() == 202) {
       settleRefund(a, both.first(), both.firstOutcome(), model);
     }
@@ -608,6 +625,10 @@ class PaymentHistoryPropertyTest {
               .update();
         });
     ANSWERS.clear();
+    // Requests are recorded for other tests' assertions; this one never reads them, so they would
+    // only pile up over a thousand histories. reset() also drops the responder: set it again.
+    PSP.reset();
+    PSP.respond(PaymentHistoryPropertyTest::answer);
     concurrency.clear();
     merchant = "m_" + UUID.randomUUID();
     apiKey = "mk_test_" + UUID.randomUUID();
