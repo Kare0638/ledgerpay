@@ -87,7 +87,7 @@ class CsvTest {
         .hasMessageContaining("after a closing quote");
   }
 
-  @Property
+  @Property(tries = 1_000)
   void whatIsWrittenParsesBackToTheSameValues(@ForAll @Size(min = 1, max = 6) List<String> cells)
       throws Exception {
     List<Record> records = Csv.parse(Csv.row(cells));

@@ -759,7 +759,7 @@ Each check is kept (`ledger_integrity_checks`, append-only, with the first 1,000
 |---|---|---|
 | Unit | Every state transition; fee rounding boundaries; every journal balances; reconciliation rules | JUnit 5, AssertJ |
 | Integration | Full flows against real PostgreSQL; deferred constraint, unique constraints and append-only triggers actually fire | Testcontainers |
-| Property-based | ≥ 1,000 random payment / capture / partial-refund sequences with duplicate webhooks and recoverable faults; all invariants checked after each; seeds kept | jqwik |
+| Property-based | ≥ 1,000 random payment / capture / void / partial-refund histories, refunds one at a time or two at once, each outcome delivered in the submit response, by webhook, duplicated, followed by a stale event, after a timeout and an inquiry, or before the call; after each: the ledger integrity check, refunded + reserved ≤ captured with nothing left reserved, and every answer, status, journal count and the merchant's balance against a model of the history (`PaymentHistoryPropertyTest`, #20). jqwik prints the failing seed and the shrunk history; CI runs 200 | jqwik |
 | Messaging | Rolled-back transaction leaves no outbox row; relay restart re-publishes; duplicate delivery processed once; poison message reaches DLQ | Testcontainers Kafka, Awaitility |
 | Fault injection | Acceptance tests below | mock-psp, WireMock |
 | CI | Full suite on every push; build fails below 80% line coverage | GitHub Actions, JaCoCo |

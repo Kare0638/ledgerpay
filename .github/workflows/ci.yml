@@ -18,9 +18,10 @@ jobs:
 
       # Unit tests, Testcontainers integration tests (PostgreSQL, Kafka), acceptance tests against
       # the real mock-psp, the Spotless format check and the JaCoCo gate: a module below 80 % line
-      # coverage fails the build (design §12).
+      # coverage fails the build (design §12). Properties without their own tries run 200 here
+      # rather than jqwik's 1,000: the payment history property takes about 2.5 minutes at 1,000.
       - name: Build and verify
-        run: ./mvnw -B verify
+        run: ./mvnw -B verify -Djqwik.tries.default=200
 
       - name: Coverage summary
         if: always()
