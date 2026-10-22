@@ -80,6 +80,20 @@ class RefundAcceptanceTest extends AcceptanceTestSupport {
         .list();
   }
 
+  /** mock-psp's own status for the refund, found by the request ID we sent it. */
+  String pspStatus(UUID refundId) {
+    String requestId =
+        jdbc.sql("SELECT psp_request_id FROM psp_operations WHERE refund_id = ?")
+            .param(refundId)
+            .query(String.class)
+            .single();
+    return mockPsp
+        .sql("SELECT status FROM operations WHERE psp_request_id = ?")
+        .param(requestId)
+        .query(String.class)
+        .single();
+  }
+
   /** AT-10: £100 refunded as £30 then £70. */
   @Test
   void at10ThirtyThenSeventyRefundsInFull() throws Exception {
@@ -156,6 +170,10 @@ class RefundAcceptanceTest extends AcceptanceTestSupport {
         .containsEntry("refunded_minor", 4_000L)
         .containsEntry("refund_reserved_minor", 0L);
     assertThat(refundJournals(paymentId)).isEqualTo(1);
-    assertThat(pspRefunds()).containsExactly("SUCCEEDED", "FAILED");
+    // By request ID, not in created_at order: that is wall-clock time, and one WSL clock jump
+    // during a run put the second refund first.
+    assertThat(pspStatus(timedOut)).isEqualTo("SUCCEEDED");
+    assertThat(pspStatus(declined)).isEqualTo("FAILED");
+    assertThat(pspRefunds()).hasSize(2);
   }
 }
