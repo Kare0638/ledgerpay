@@ -8,6 +8,7 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.ledgerpay.payment.PostgresTestcontainersConfiguration;
 import com.ledgerpay.payment.ledger.integrity.LedgerIntegrity;
+import com.ledgerpay.payment.metrics.PaymentMetrics;
 import com.ledgerpay.payment.settlement.SettlementImporter;
 import com.ledgerpay.payment.settlement.SettlementReports;
 import java.net.URI;
@@ -113,6 +114,7 @@ class ReconRunIntegrationTest {
   @Autowired BooksSnapshot books;
   @Autowired TransactionTemplate transactions;
   @Autowired LedgerIntegrity integrity;
+  @Autowired PaymentMetrics metrics;
 
   final HttpClient http = HttpClient.newHttpClient();
   String merchant;
@@ -528,7 +530,8 @@ class ReconRunIntegrationTest {
         executor,
         heartbeat,
         new ReconProperties(Duration.ofSeconds(1), Duration.ofMinutes(1)),
-        integrity);
+        integrity,
+        metrics);
   }
 
   /**

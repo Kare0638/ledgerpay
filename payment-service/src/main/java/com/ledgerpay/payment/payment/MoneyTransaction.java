@@ -4,6 +4,7 @@ import com.ledgerpay.common.money.Money;
 import com.ledgerpay.payment.ledger.EntryType;
 import com.ledgerpay.payment.ledger.Ledger;
 import com.ledgerpay.payment.ledger.PostingRules;
+import com.ledgerpay.payment.metrics.PaymentMetrics;
 import com.ledgerpay.payment.outbox.Outbox;
 import com.ledgerpay.payment.psp.ClaimedOperation;
 import com.ledgerpay.payment.psp.PspOperationType;
@@ -20,6 +21,7 @@ import java.util.Optional;
 import java.util.UUID;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.slf4j.MDC;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
@@ -80,6 +82,7 @@ public class MoneyTransaction implements PspOutcomeHandler {
   private final Ledger ledger;
   private final Outbox outbox;
   private final String psp;
+  private final PaymentMetrics metrics;
 
   public MoneyTransaction(
       Payments payments,
@@ -87,13 +90,15 @@ public class MoneyTransaction implements PspOutcomeHandler {
       PspOperations operations,
       Ledger ledger,
       Outbox outbox,
-      PspProperties properties) {
+      PspProperties properties,
+      PaymentMetrics metrics) {
     this.payments = payments;
     this.refunds = refunds;
     this.operations = operations;
     this.ledger = ledger;
     this.outbox = outbox;
     this.psp = properties.provider();
+    this.metrics = metrics;
   }
 
   @Transactional
@@ -102,7 +107,14 @@ public class MoneyTransaction implements PspOutcomeHandler {
     if (paymentId.isEmpty()) {
       return new Result.Quarantined("Unknown psp_request_id " + outcome.pspRequestId());
     }
-    Payment payment = payments.lock(paymentId.get()).orElseThrow();
+    try (var payment = MDC.putCloseable("paymentId", paymentId.get().toString());
+        var request = MDC.putCloseable("pspRequestId", outcome.pspRequestId())) {
+      return apply(outcome, paymentId.get());
+    }
+  }
+
+  private Result apply(Outcome outcome, UUID paymentId) {
+    Payment payment = payments.lock(paymentId).orElseThrow();
     OperationRow operation = operations.lock(outcome.pspRequestId());
 
     String mismatch = mismatch(outcome, payment, operation);
@@ -144,6 +156,7 @@ public class MoneyTransaction implements PspOutcomeHandler {
           outcome.failureReason());
     }
 
+    metrics.outcomeApplied(operation.type().name(), outcome.succeeded());
     if (operation.type() == PspOperationType.REFUND) {
       applyRefund(payment, operation, outcome);
       return new Result.Applied();

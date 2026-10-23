@@ -1,6 +1,7 @@
 package com.ledgerpay.payment.reconciliation;
 
 import com.ledgerpay.payment.ledger.integrity.LedgerIntegrity;
+import com.ledgerpay.payment.metrics.PaymentMetrics;
 import com.ledgerpay.payment.settlement.SettlementReport;
 import com.ledgerpay.payment.settlement.SettlementReports;
 import com.ledgerpay.payment.settlement.SettlementRow;
@@ -38,6 +39,7 @@ public class ReconEngine {
   private final ScheduledExecutorService heartbeat;
   private final Duration heartbeatInterval;
   private final LedgerIntegrity integrity;
+  private final PaymentMetrics metrics;
 
   public ReconEngine(
       ReconRuns runs,
@@ -47,7 +49,8 @@ public class ReconEngine {
       @Qualifier("reconExecutor") ExecutorService executor,
       @Qualifier("reconHeartbeat") ScheduledExecutorService heartbeat,
       ReconProperties properties,
-      LedgerIntegrity integrity) {
+      LedgerIntegrity integrity,
+      PaymentMetrics metrics) {
     this.runs = runs;
     this.reports = reports;
     this.books = books;
@@ -56,6 +59,7 @@ public class ReconEngine {
     this.heartbeat = heartbeat;
     this.heartbeatInterval = properties.heartbeatInterval();
     this.integrity = integrity;
+    this.metrics = metrics;
   }
 
   /** Starts a run of a VALID report; the caller has checked that it is one. */
@@ -80,6 +84,8 @@ public class ReconEngine {
     long every = heartbeatInterval.toMillis();
     ScheduledFuture<?> beating =
         heartbeat.scheduleAtFixedRate(() -> beat(runId), every, every, TimeUnit.MILLISECONDS);
+    long started = System.nanoTime();
+    String outcome = ReconRun.FAILED;
     try {
       List<SettlementRow> rows = reports.rows(report.reportId());
       BooksSnapshot.Snapshot snapshot = books.read(runId, report.reportId(), report.businessDate());
@@ -99,6 +105,7 @@ public class ReconEngine {
                     return false;
                   }));
       if (completed) {
+        outcome = ReconRun.COMPLETED;
         log.info(
             "Recon run {} of report {} ({} {} v{}) completed: {} items, {}",
             runId,
@@ -116,6 +123,7 @@ public class ReconEngine {
       runs.fail(runId, e.getClass().getSimpleName() + ": " + e.getMessage());
     } finally {
       beating.cancel(false);
+      metrics.reconRun(outcome, Duration.ofNanos(System.nanoTime() - started));
     }
   }
 

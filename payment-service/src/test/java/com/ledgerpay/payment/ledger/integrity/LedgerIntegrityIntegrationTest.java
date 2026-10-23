@@ -216,7 +216,10 @@ class LedgerIntegrityIntegrationTest {
     return send("GET", "/actuator/prometheus", null)
         .text()
         .lines()
-        .filter(line -> line.startsWith("ledger_invariant_violations "))
+        .filter(line -> line.startsWith("ledger_invariant_violations"))
+        .filter(line -> !line.startsWith("ledger_invariant_violations_"))
+        // Every series carries the application label; the value is what is compared.
+        .map(line -> line.replaceFirst("\\{[^}]*\\}", ""))
         .findFirst()
         .orElseThrow();
   }

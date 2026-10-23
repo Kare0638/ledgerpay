@@ -1,0 +1,199 @@
+# Unit tests for alerts.yml: promtool test rules alerts.test.yml (run by CI and infra/prometheus/test.sh).
+# Each rule fires on the series that should trigger it, at the time it should, and not before.
+rule_files:
+  - alerts.yml
+
+evaluation_interval: 1m
+
+tests:
+  - name: a ledger violation is an alert at once
+    interval: 1m
+    input_series:
+      - series: 'ledger_invariant_violations{application="payment-service"}'
+        values: "0 2"
+    alert_rule_test:
+      - eval_time: 0m
+        alertname: LedgerInvariantViolated
+        exp_alerts: []
+      - eval_time: 1m
+        alertname: LedgerInvariantViolated
+        exp_alerts:
+          - exp_labels: {severity: blocking, application: payment-service}
+            exp_annotations:
+              summary: "The ledger disagrees with itself: 2 violation(s)"
+              description: >-
+                The latest ledger integrity check failed. Read it at GET /ops/ledger-integrity-checks
+                and stop changes to the books until it is understood.
+
+  - name: an operation pending over 5 minutes alerts after a minute more
+    interval: 1m
+    input_series:
+      - series: 'psp_operation_oldest_pending_seconds{application="payment-service"}'
+        values: "100 200 310 380 440"
+    alert_rule_test:
+      - eval_time: 2m
+        alertname: PspOperationPendingTooLong
+        exp_alerts: []
+      - eval_time: 3m
+        alertname: PspOperationPendingTooLong
+        exp_alerts:
+          - exp_labels: {severity: page, application: payment-service}
+            exp_annotations:
+              summary: "A PSP operation has had no outcome for 6m 20s"
+              description: >-
+                An operation is still PENDING more than 5 minutes after it was created: the webhook may
+                be lost and the safety-net inquiry not due yet, or the PSP unreachable.
+
+  - name: an operation set aside for review
+    interval: 1m
+    input_series:
+      - series: 'psp_operations_needs_review{application="payment-service"}'
+        values: "0 1"
+    alert_rule_test:
+      - eval_time: 0m
+        alertname: PspOperationNeedsReview
+        exp_alerts: []
+      - eval_time: 1m
+        alertname: PspOperationNeedsReview
+        exp_alerts:
+          - exp_labels: {severity: page, application: payment-service}
+            exp_annotations:
+              summary: "1 PSP operation(s) set aside for review"
+              description: >-
+                The worker gave up after repeated failures and the outcome is unknown. Inquire with
+                POST /ops/psp-operations/{id}/inquiry once the PSP answers.
+
+  - name: a quarantined webhook
+    interval: 1m
+    input_series:
+      - series: 'inbox_quarantined_events{application="payment-service"}'
+        values: "0 3"
+    alert_rule_test:
+      - eval_time: 0m
+        alertname: WebhookQuarantined
+        exp_alerts: []
+      - eval_time: 1m
+        alertname: WebhookQuarantined
+        exp_alerts:
+          - exp_labels: {severity: page, application: payment-service}
+            exp_annotations:
+              summary: "3 PSP webhook(s) quarantined"
+              description: >-
+                Webhooks that contradict our records or could not be applied wait in inbox_events with
+                status QUARANTINED and their reason.
+
+  - name: an outbox backlog alerts after 5 minutes over a minute old
+    interval: 1m
+    input_series:
+      - series: 'outbox_publish_lag_seconds{application="payment-service"}'
+        values: "30 30 90 150 210 270 330 390 450"
+    alert_rule_test:
+      - eval_time: 6m
+        alertname: OutboxBacklog
+        exp_alerts: []
+      - eval_time: 7m
+        alertname: OutboxBacklog
+        exp_alerts:
+          - exp_labels: {severity: page, application: payment-service}
+            exp_annotations:
+              summary: "Outbox events have waited 6m 30s to be published"
+              description: "Kafka is unreachable or the relay is stuck; merchants get no webhooks meanwhile."
+
+  - name: an outbox event the broker refused
+    interval: 1m
+    input_series:
+      - series: 'outbox_quarantined_events{application="payment-service"}'
+        values: "0 1"
+    alert_rule_test:
+      - eval_time: 1m
+        alertname: OutboxEventQuarantined
+        exp_alerts:
+          - exp_labels: {severity: page, application: payment-service}
+            exp_annotations:
+              summary: "1 outbox event(s) refused by the broker and quarantined"
+              description: "Its payment's later events wait behind it until a human deals with it (ADR 0006)."
+
+  - name: a dead-lettered event alerts for ten minutes
+    interval: 1m
+    input_series:
+      - series: 'notification_dead_lettered_total{application="notification-service"}'
+        values: "0 0 1x15"
+    alert_rule_test:
+      - eval_time: 1m
+        alertname: EventDeadLettered
+        exp_alerts: []
+      - eval_time: 3m
+        alertname: EventDeadLettered
+        exp_alerts:
+          - exp_labels: {severity: page, application: notification-service}
+            exp_annotations:
+              summary: "An event was dead-lettered to payments.events.dlq"
+              description: "A merchant webhook was given up on, or the event was malformed. Nothing replays the topic."
+      - eval_time: 14m
+        alertname: EventDeadLettered
+        exp_alerts: []
+
+  - name: a failed reconciliation run alerts for an hour
+    interval: 1m
+    input_series:
+      - series: 'recon_run_duration_seconds_count{application="payment-service",status="failed"}'
+        values: "0 0 1x70"
+      - series: 'recon_run_duration_seconds_count{application="payment-service",status="completed"}'
+        values: "0+1x72"
+    alert_rule_test:
+      - eval_time: 1m
+        alertname: ReconciliationRunFailed
+        exp_alerts: []
+      - eval_time: 3m
+        alertname: ReconciliationRunFailed
+        exp_alerts:
+          - exp_labels: {severity: ticket, application: payment-service, status: failed}
+            exp_annotations:
+              summary: "A reconciliation run failed"
+              description: "The run's error is at GET /ops/recon-runs/{id}; the report can be run again."
+      - eval_time: 65m
+        alertname: ReconciliationRunFailed
+        exp_alerts: []
+
+  - name: breaks in the latest run, and none once a new run matches
+    interval: 1m
+    input_series:
+      - series: 'recon_breaks{application="payment-service",category="MATCHED"}'
+        values: "3 3 4"
+      - series: 'recon_breaks{application="payment-service",category="STATUS_MISMATCH"}'
+        values: "0 1 0"
+      - series: 'recon_breaks{application="payment-service",category="AMOUNT_MISMATCH"}'
+        values: "0 0 0"
+    alert_rule_test:
+      - eval_time: 0m
+        alertname: ReconciliationBreaks
+        exp_alerts: []
+      - eval_time: 1m
+        alertname: ReconciliationBreaks
+        exp_alerts:
+          - exp_labels: {severity: ticket, application: payment-service}
+            exp_annotations:
+              summary: "The latest reconciliation run has 1 break(s)"
+              description: >-
+                See GET /ops/recon-runs/{id}/items. STATUS_MISMATCH items are fixed by an inquiry and a
+                new run; never by editing the books.
+      - eval_time: 2m
+        alertname: ReconciliationBreaks
+        exp_alerts: []
+
+  - name: a service that cannot be scraped for a minute
+    interval: 1m
+    input_series:
+      - series: 'up{job="payment-service",instance="payment-service:8080"}'
+        values: "1 0 0"
+    alert_rule_test:
+      - eval_time: 1m
+        alertname: ServiceDown
+        exp_alerts: []
+      - eval_time: 2m
+        alertname: ServiceDown
+        exp_alerts:
+          - exp_labels: {severity: page, job: payment-service, instance: "payment-service:8080"}
+            exp_annotations:
+              summary: "payment-service cannot be scraped"
+              description: "The service is down, or its metrics endpoint refuses the ops key."

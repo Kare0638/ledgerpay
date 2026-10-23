@@ -3,6 +3,7 @@ package com.ledgerpay.payment.idempotency;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.ledgerpay.payment.metrics.PaymentMetrics;
 import java.util.Optional;
 import java.util.function.Supplier;
 import org.springframework.jdbc.core.simple.JdbcClient;
@@ -30,8 +31,10 @@ public class IdempotentExecutor {
 
   private final JdbcClient jdbc;
   private final ObjectMapper json;
+  private final PaymentMetrics metrics;
 
-  public IdempotentExecutor(JdbcClient jdbc, ObjectMapper json) {
+  public IdempotentExecutor(JdbcClient jdbc, ObjectMapper json, PaymentMetrics metrics) {
+    this.metrics = metrics;
     this.jdbc = jdbc;
     this.json = json;
   }
@@ -103,6 +106,7 @@ public class IdempotentExecutor {
     if (!"COMPLETED".equals(stored.get().status())) {
       throw new IdempotencyInProgressException();
     }
+    metrics.idempotencyReplay();
     return new IdempotentResponse(stored.get().responseCode(), parse(stored.get().body()), true);
   }
 

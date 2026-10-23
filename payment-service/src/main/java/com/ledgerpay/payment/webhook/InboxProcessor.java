@@ -4,6 +4,7 @@ import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.ledgerpay.common.money.Money;
 import com.ledgerpay.payment.api.DatabaseFailures;
+import com.ledgerpay.payment.metrics.PaymentMetrics;
 import com.ledgerpay.payment.payment.MoneyTransaction;
 import com.ledgerpay.payment.payment.MoneyTransaction.Outcome;
 import com.ledgerpay.payment.payment.MoneyTransaction.ReportedStatus;
@@ -29,8 +30,15 @@ public class InboxProcessor {
   private final ObjectMapper json;
   private final TransactionTemplate transactions;
 
+  private final PaymentMetrics metrics;
+
   public InboxProcessor(
-      Inbox inbox, MoneyTransaction money, ObjectMapper json, TransactionTemplate transactions) {
+      Inbox inbox,
+      MoneyTransaction money,
+      ObjectMapper json,
+      TransactionTemplate transactions,
+      PaymentMetrics metrics) {
+    this.metrics = metrics;
     this.inbox = inbox;
     this.money = money;
     this.json = json;
@@ -68,6 +76,7 @@ public class InboxProcessor {
       // Retrying would fail the same way forever: park the event for a human instead.
       Inbox.Pending pending = claimed[0];
       log.error("Webhook {} could not be applied; quarantined", pending.eventId(), e);
+      metrics.inboxQuarantined();
       transactions.executeWithoutResult(
           status ->
               inbox.finish(
@@ -90,6 +99,7 @@ public class InboxProcessor {
         };
     if (result instanceof Result.Quarantined) {
       log.error("Webhook {} quarantined: {}", pending.eventId(), reason);
+      metrics.inboxQuarantined();
       inbox.finish(pending.provider(), pending.eventId(), "QUARANTINED", reason);
     } else {
       inbox.finish(pending.provider(), pending.eventId(), "PROCESSED", reason);

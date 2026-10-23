@@ -1,0 +1,101 @@
+# Alert rules (design §13, #22). Each has a unit test in alerts.test.yml (promtool test rules).
+# severity: blocking = money may be wrong, stop and look; page = needs a human soon; ticket = look
+# within the day.
+groups:
+  - name: ledger
+    rules:
+      - alert: LedgerInvariantViolated
+        expr: ledger_invariant_violations > 0
+        labels:
+          severity: blocking
+        annotations:
+          summary: "The ledger disagrees with itself: {{ $value }} violation(s)"
+          description: >-
+            The latest ledger integrity check failed. Read it at GET /ops/ledger-integrity-checks
+            and stop changes to the books until it is understood.
+
+  - name: psp
+    rules:
+      - alert: PspOperationPendingTooLong
+        expr: psp_operation_oldest_pending_seconds > 300
+        for: 1m
+        labels:
+          severity: page
+        annotations:
+          summary: "A PSP operation has had no outcome for {{ $value | humanizeDuration }}"
+          description: >-
+            An operation is still PENDING more than 5 minutes after it was created: the webhook may
+            be lost and the safety-net inquiry not due yet, or the PSP unreachable.
+      - alert: PspOperationNeedsReview
+        expr: psp_operations_needs_review > 0
+        labels:
+          severity: page
+        annotations:
+          summary: "{{ $value }} PSP operation(s) set aside for review"
+          description: >-
+            The worker gave up after repeated failures and the outcome is unknown. Inquire with
+            POST /ops/psp-operations/{id}/inquiry once the PSP answers.
+
+  - name: messaging
+    rules:
+      - alert: WebhookQuarantined
+        expr: inbox_quarantined_events > 0
+        labels:
+          severity: page
+        annotations:
+          summary: "{{ $value }} PSP webhook(s) quarantined"
+          description: >-
+            Webhooks that contradict our records or could not be applied wait in inbox_events with
+            status QUARANTINED and their reason.
+      - alert: OutboxBacklog
+        expr: outbox_publish_lag_seconds > 60
+        for: 5m
+        labels:
+          severity: page
+        annotations:
+          summary: "Outbox events have waited {{ $value | humanizeDuration }} to be published"
+          description: "Kafka is unreachable or the relay is stuck; merchants get no webhooks meanwhile."
+      - alert: OutboxEventQuarantined
+        expr: outbox_quarantined_events > 0
+        labels:
+          severity: page
+        annotations:
+          summary: "{{ $value }} outbox event(s) refused by the broker and quarantined"
+          description: "Its payment's later events wait behind it until a human deals with it (ADR 0006)."
+      - alert: EventDeadLettered
+        expr: increase(notification_dead_lettered_total[10m]) > 0
+        labels:
+          severity: page
+        annotations:
+          summary: "An event was dead-lettered to payments.events.dlq"
+          description: "A merchant webhook was given up on, or the event was malformed. Nothing replays the topic."
+
+  - name: reconciliation
+    rules:
+      - alert: ReconciliationRunFailed
+        expr: increase(recon_run_duration_seconds_count{status="failed"}[1h]) > 0
+        labels:
+          severity: ticket
+        annotations:
+          summary: "A reconciliation run failed"
+          description: "The run's error is at GET /ops/recon-runs/{id}; the report can be run again."
+      - alert: ReconciliationBreaks
+        expr: sum by (application) (recon_breaks{category!="MATCHED"}) > 0
+        labels:
+          severity: ticket
+        annotations:
+          summary: "The latest reconciliation run has {{ $value }} break(s)"
+          description: >-
+            See GET /ops/recon-runs/{id}/items. STATUS_MISMATCH items are fixed by an inquiry and a
+            new run; never by editing the books.
+
+  - name: services
+    rules:
+      - alert: ServiceDown
+        expr: up == 0
+        for: 1m
+        labels:
+          severity: page
+        annotations:
+          summary: "{{ $labels.job }} cannot be scraped"
+          description: "The service is down, or its metrics endpoint refuses the ops key."
