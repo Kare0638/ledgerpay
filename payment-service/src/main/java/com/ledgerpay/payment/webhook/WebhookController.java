@@ -4,6 +4,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.ledgerpay.common.webhook.WebhookSignature;
 import com.ledgerpay.payment.api.ApiException;
 import com.ledgerpay.payment.api.ErrorCode;
+import com.ledgerpay.payment.metrics.PaymentMetrics;
 import com.ledgerpay.payment.psp.PspProperties;
 import jakarta.validation.Validator;
 import java.io.IOException;
@@ -37,9 +38,16 @@ class WebhookController {
   private final Clock clock;
   private final String provider;
   private final byte[] secret;
+  private final PaymentMetrics metrics;
 
   WebhookController(
-      Inbox inbox, ObjectMapper json, Validator validator, Clock clock, PspProperties properties) {
+      Inbox inbox,
+      ObjectMapper json,
+      Validator validator,
+      Clock clock,
+      PspProperties properties,
+      PaymentMetrics metrics) {
+    this.metrics = metrics;
     this.inbox = inbox;
     this.json = json;
     this.validator = validator;
@@ -54,6 +62,7 @@ class WebhookController {
       @RequestHeader(name = WebhookSignature.SIGNATURE_HEADER, required = false) String signature,
       @RequestBody byte[] body) {
     if (!WebhookSignature.verify(secret, timestamp, body, signature, clock.instant())) {
+      metrics.webhookSignatureFailure();
       throw new ApiException(ErrorCode.UNAUTHENTICATED, "Invalid webhook signature");
     }
     WebhookEvent event = parse(body);

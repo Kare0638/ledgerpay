@@ -12,7 +12,8 @@ class OpsConfiguration {
   FilterRegistrationBean<OpsKeyAuthFilter> opsKeyAuthFilter(
       @Value("${ledgerpay.ops.api-key-hash:}") String apiKeyHash) {
     var registration = new FilterRegistrationBean<>(new OpsKeyAuthFilter(apiKeyHash));
-    registration.addUrlPatterns("/ops/*");
+    // Metrics too, as in payment-service: Prometheus scrapes with the ops key as a bearer token.
+    registration.addUrlPatterns("/ops/*", "/actuator/prometheus");
     return registration;
   }
 }

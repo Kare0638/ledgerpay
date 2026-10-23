@@ -1,6 +1,7 @@
 package com.ledgerpay.notification.delivery;
 
 import com.ledgerpay.notification.NotificationProperties;
+import io.micrometer.core.instrument.MeterRegistry;
 import org.apache.kafka.clients.admin.NewTopic;
 import org.apache.kafka.common.TopicPartition;
 import org.slf4j.Logger;
@@ -46,7 +47,11 @@ class KafkaConfiguration {
    */
   @Bean
   DefaultErrorHandler errorHandler(
-      KafkaTemplate<Object, Object> template, NotificationProperties properties) {
+      KafkaTemplate<Object, Object> template,
+      NotificationProperties properties,
+      MeterRegistry meters) {
+    // notification_dead_lettered_total: nothing replays the topic, so each one is an alert.
+    var deadLettered = meters.counter("notification.dead.lettered");
     String deadLetterTopic = properties.deadLetterTopic();
     // A negative partition lets the producer choose by key, so the topics need not match.
     var recoverer =
@@ -60,6 +65,7 @@ class KafkaConfiguration {
                   record.offset(),
                   deadLetterTopic,
                   exception);
+              deadLettered.increment();
               return new TopicPartition(deadLetterTopic, -1);
             });
     var retry = properties.retry();

@@ -3,9 +3,11 @@ package com.ledgerpay.notification.delivery;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.ledgerpay.notification.endpoint.MerchantEndpoint;
 import com.ledgerpay.notification.endpoint.MerchantEndpoints;
+import io.micrometer.core.instrument.MeterRegistry;
 import java.util.Optional;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.slf4j.MDC;
 import org.springframework.kafka.annotation.KafkaListener;
 import org.springframework.stereotype.Component;
 
@@ -24,20 +26,49 @@ class NotificationHandler {
   private final Deliveries deliveries;
   private final MerchantEndpoints endpoints;
   private final WebhookSender sender;
+  private final MeterRegistry meters;
 
   NotificationHandler(
-      ObjectMapper json, Deliveries deliveries, MerchantEndpoints endpoints, WebhookSender sender) {
+      ObjectMapper json,
+      Deliveries deliveries,
+      MerchantEndpoints endpoints,
+      WebhookSender sender,
+      MeterRegistry meters) {
+    this.meters = meters;
+    for (String result : new String[] {"delivered", "no_endpoint", "failed", "duplicate"}) {
+      count(result, 0); // registered at 0, for dashboards and alerts
+    }
     this.json = json;
     this.deliveries = deliveries;
     this.endpoints = endpoints;
     this.sender = sender;
   }
 
+  /**
+   * {@code webhook_deliveries_total{result}} (design §13): delivered, no_endpoint or failed, each
+   * attempt counted; {@code duplicate} for an event already handled.
+   */
+  private void count(String result) {
+    count(result, 1);
+  }
+
+  private void count(String result, double by) {
+    meters.counter("webhook.deliveries", "result", result).increment(by);
+  }
+
   @KafkaListener(topics = "${ledgerpay.notification.topic}")
   void onEvent(String value) {
     PaymentEvent event = PaymentEvent.parse(json, value);
+    try (var eventId = MDC.putCloseable("eventId", event.eventId().toString());
+        var paymentId = MDC.putCloseable("paymentId", String.valueOf(event.paymentId()))) {
+      handle(event);
+    }
+  }
+
+  private void handle(PaymentEvent event) {
     if (deliveries.isProcessed(event)) {
       log.debug("Event {} already processed; skipped", event.eventId());
+      count("duplicate");
       return;
     }
     Optional<MerchantEndpoint> endpoint = endpoints.find(event.merchantId());
@@ -47,9 +78,17 @@ class NotificationHandler {
           event.merchantId(),
           event.eventId());
       deliveries.record(event, Deliveries.Status.NO_ENDPOINT, null, null);
+      count("no_endpoint");
       return;
     }
-    int status = sender.send(endpoint.get(), event);
+    int status;
+    try {
+      status = sender.send(endpoint.get(), event);
+    } catch (RuntimeException e) {
+      count("failed");
+      throw e;
+    }
+    count("delivered");
     // A crash or a database failure here sends the webhook again on redelivery: merchants
     // de-duplicate on the event ID header.
     deliveries.record(

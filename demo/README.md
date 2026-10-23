@@ -30,6 +30,10 @@ Then:
 5. **The books**: receivable 32000 = merchant payable 31650 + fee revenue 350, and the ledger integrity check passes.
 6. **Four single-fault variants** of the report, each a new version reconciled against the fixed books.
 
+## Alerts
+
+`demo/alerts.sh`, on the stack `demo/run.sh` leaves up, checks that Prometheus fires `ReconciliationBreaks` for the last variant's break, and `WebhookQuarantined` for a signed webhook about an operation we never asked for. It also checks that `LedgerInvariantViolated` and `ServiceDown` stay quiet. `--screenshot FILE.png` also captures the Grafana dashboard, with headless Chrome in a container.
+
 ## Expected results
 
 Each run is compared with a file in [`expected/`](expected/), in SQL inside the stack's PostgreSQL, so the host needs no JSON tool. Items are named by their labels (P1, R1, P2, P3, UNKNOWN), which the script maps to the PSP references of the run. Every key but `description` must match exactly:

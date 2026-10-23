@@ -76,6 +76,27 @@ jobs:
       - name: Run the reconciliation demo
         run: demo/run.sh
 
+      # Alerts firing in a fault-injection scenario (#22): the run's break, and a quarantined webhook.
+      - name: Check the alerts fire
+        run: demo/alerts.sh --screenshot grafana-dashboard.png
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: grafana-dashboard
+          path: grafana-dashboard.png
+          if-no-files-found: ignore
+          retention-days: 14
+
       - name: Service logs
         if: failure()
         run: docker compose -p ledgerpay-recon-demo -f infra/docker-compose.yml logs --no-color --tail 200
+
+  # The alert rules' unit tests (promtool test rules), with the Prometheus image the stack runs.
+  alert-rules:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Test the alert rules
+        run: infra/prometheus/test.sh

@@ -8,6 +8,7 @@ import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 import com.ledgerpay.notification.NotificationProperties;
+import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
 import java.time.Duration;
 import java.util.List;
 import java.util.concurrent.CompletableFuture;
@@ -28,6 +29,8 @@ class KafkaConfigurationTest {
   @SuppressWarnings("unchecked")
   final KafkaTemplate<Object, Object> deadLetters = mock(KafkaTemplate.class);
 
+  final SimpleMeterRegistry meters = new SimpleMeterRegistry();
+
   final DefaultErrorHandler handler =
       new KafkaConfiguration()
           .errorHandler(
@@ -39,7 +42,8 @@ class KafkaConfigurationTest {
                   Duration.ofSeconds(2),
                   Duration.ofSeconds(5),
                   new NotificationProperties.Retry(
-                      3, Duration.ofSeconds(1), 2.0, Duration.ofSeconds(10))));
+                      3, Duration.ofSeconds(1), 2.0, Duration.ofSeconds(10))),
+              meters);
 
   /**
    * Retrying would read the same bytes the same way: a malformed event is dead-lettered without
@@ -97,8 +101,11 @@ class KafkaConfigurationTest {
     }
     verify(deadLetters, never()).send(any(ProducerRecord.class));
 
+    assertThat(meters.counter("notification.dead.lettered").count()).isZero();
+
     assertThat(fail(new DeliveryFailedException("Merchant m_1 answered 503"))).isFalse();
     verify(deadLetters).send(any(ProducerRecord.class));
+    assertThat(meters.counter("notification.dead.lettered").count()).isEqualTo(1);
   }
 
   /**
@@ -114,5 +121,6 @@ class KafkaConfigurationTest {
     }
 
     verify(deadLetters, never()).send(any(ProducerRecord.class));
+    assertThat(meters.counter("notification.dead.lettered").count()).isZero();
   }
 }

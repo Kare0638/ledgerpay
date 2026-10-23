@@ -1,11 +1,13 @@
 package com.ledgerpay.benchmarks;
 
+import com.ledgerpay.payment.metrics.PaymentMetrics;
 import com.ledgerpay.payment.psp.PspClient;
 import com.ledgerpay.payment.psp.PspOperationWorker;
 import com.ledgerpay.payment.psp.PspOperations;
 import com.ledgerpay.payment.psp.PspProperties;
 import com.zaxxer.hikari.HikariConfig;
 import com.zaxxer.hikari.HikariDataSource;
+import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
 import java.io.BufferedReader;
 import java.io.IOException;
 import java.io.InputStreamReader;
@@ -140,7 +142,8 @@ public class PspDispatchBenchmark {
               throw new IllegalStateException("The stub never returns a final outcome");
             },
             properties,
-            calls);
+            calls,
+            new PaymentMetrics(new SimpleMeterRegistry()));
   }
 
   static ExecutorService executor(String name) {
