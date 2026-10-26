@@ -74,7 +74,9 @@ public class ReconEngine {
     } catch (RejectedExecutionException e) {
       // Shutting down. The run is already stored, so fail it now rather than leave it looking in
       // progress until the sweeper gives up on it.
-      runs.fail(runId, "not started: " + e.getMessage());
+      if (runs.fail(runId, "not started: " + e.getMessage())) {
+        metrics.reconRunsFailed(1);
+      }
       throw e;
     }
     return runs.find(runId).orElseThrow();
@@ -116,11 +118,14 @@ public class ReconEngine {
             items.size(),
             breaks(summary));
       } else {
+        // The sweeper failed it, and counted it then; this is not a second failure.
         log.warn("Recon run {} finished after it was given up as abandoned; result dropped", runId);
       }
     } catch (RuntimeException e) {
       log.error("Recon run {} failed", runId, e);
-      runs.fail(runId, e.getClass().getSimpleName() + ": " + e.getMessage());
+      if (runs.fail(runId, e.getClass().getSimpleName() + ": " + e.getMessage())) {
+        metrics.reconRunsFailed(1);
+      }
     } finally {
       beating.cancel(false);
       metrics.reconRun(outcome, Duration.ofNanos(System.nanoTime() - started));

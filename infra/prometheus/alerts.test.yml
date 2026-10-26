@@ -136,10 +136,9 @@ tests:
   - name: a failed reconciliation run alerts for an hour
     interval: 1m
     input_series:
-      - series: 'recon_run_duration_seconds_count{application="payment-service",status="failed"}'
+      # Registered at 0 when the service starts, so the first failure is an increase.
+      - series: 'recon_runs_failed_total{application="payment-service"}'
         values: "0 0 1x70"
-      - series: 'recon_run_duration_seconds_count{application="payment-service",status="completed"}'
-        values: "0+1x72"
     alert_rule_test:
       - eval_time: 1m
         alertname: ReconciliationRunFailed
@@ -147,7 +146,7 @@ tests:
       - eval_time: 3m
         alertname: ReconciliationRunFailed
         exp_alerts:
-          - exp_labels: {severity: ticket, application: payment-service, status: failed}
+          - exp_labels: {severity: ticket, application: payment-service}
             exp_annotations:
               summary: "A reconciliation run failed"
               description: "The run's error is at GET /ops/recon-runs/{id}; the report can be run again."
@@ -173,7 +172,7 @@ tests:
         exp_alerts:
           - exp_labels: {severity: ticket, application: payment-service}
             exp_annotations:
-              summary: "The latest reconciliation run has 1 break(s)"
+              summary: "1 reconciliation break(s) open in the latest run of each PSP and day"
               description: >-
                 See GET /ops/recon-runs/{id}/items. STATUS_MISMATCH items are fixed by an inquiry and a
                 new run; never by editing the books.

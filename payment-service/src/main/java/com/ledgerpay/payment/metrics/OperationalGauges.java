@@ -80,7 +80,8 @@ public class OperationalGauges {
     gauge(
         meters,
         "psp.operation.oldest.pending.seconds",
-        "Age of the oldest PSP operation without an outcome; 0 when none",
+        "Age of the oldest PSP operation without an outcome and not set aside for review; 0 when"
+            + " none",
         Snapshot::oldestPendingSeconds);
     gauge(
         meters,
@@ -114,7 +115,8 @@ public class OperationalGauges {
         Snapshot::refundReservedMinor);
     for (ReconCategory category : ReconCategory.values()) {
       Gauge.builder("recon.breaks", this, g -> g.current().reconItems().get(category))
-          .description("Items per category in the latest completed reconciliation run")
+          .description(
+              "Items per category, summed over the latest completed run of each PSP and day")
           .tag("category", category.name())
           .register(meters);
     }
@@ -157,7 +159,8 @@ public class OperationalGauges {
               SELECT
                 (SELECT count(*) FROM psp_operations WHERE status = 'PENDING') AS pending,
                 (SELECT coalesce(extract(epoch FROM now() - min(created_at)), 0)
-                   FROM psp_operations WHERE status = 'PENDING') AS oldest_pending,
+                   FROM psp_operations WHERE status = 'PENDING' AND NOT needs_review)
+                    AS oldest_pending,
                 (SELECT count(*) FROM psp_operations
                   WHERE status = 'PENDING' AND needs_review) AS needs_review,
                 (SELECT count(*) FROM inbox_events WHERE status = 'QUARANTINED') AS quarantined,
@@ -169,8 +172,12 @@ public class OperationalGauges {
                     AS outbox_quarantined,
                 (SELECT coalesce(sum(refund_reserved_minor), 0) FROM payments
                   WHERE refund_reserved_minor > 0) AS reserved,
-                (SELECT summary FROM recon_runs WHERE status = 'COMPLETED'
-                  ORDER BY finished_at DESC LIMIT 1) AS recon""")
+                (SELECT coalesce(jsonb_agg(latest.summary), '[]')
+                   FROM (SELECT DISTINCT ON (s.psp, s.business_date) r.summary
+                           FROM recon_runs r JOIN settlement_reports s ON s.id = r.report_id
+                          WHERE r.status = 'COMPLETED'
+                          ORDER BY s.psp, s.business_date, r.finished_at DESC) latest)
+                    AS recon""")
           .query(
               (rs, row) ->
                   new Snapshot(
@@ -191,21 +198,26 @@ public class OperationalGauges {
     }
   }
 
-  /** Items per category of the latest run; 0 for every category before the first run. */
-  private Map<ReconCategory, Double> reconItems(String summary) {
+  /**
+   * Items per category, summed over the latest completed run of each PSP and business day: a clean
+   * run of one day, or of another PSP, cannot hide breaks still open on another. 0 for every
+   * category before the first run.
+   */
+  private Map<ReconCategory, Double> reconItems(String summaries) {
     Map<ReconCategory, Double> items = new EnumMap<>(ReconCategory.class);
-    JsonNode categories = null;
-    if (summary != null) {
-      try {
-        categories = json.readTree(summary).path("categories");
-      } catch (Exception e) {
-        log.warn("Unreadable recon run summary: {}", e.getMessage());
-      }
-    }
     for (ReconCategory category : ReconCategory.values()) {
-      items.put(
-          category,
-          categories == null ? 0.0 : categories.path(category.name()).path("items").asDouble(0));
+      items.put(category, 0.0);
+    }
+    try {
+      for (JsonNode summary : json.readTree(summaries)) {
+        JsonNode categories = summary.path("categories");
+        for (ReconCategory category : ReconCategory.values()) {
+          items.merge(
+              category, categories.path(category.name()).path("items").asDouble(0), Double::sum);
+        }
+      }
+    } catch (Exception e) {
+      log.warn("Unreadable recon run summaries: {}", e.getMessage());
     }
     return items;
   }

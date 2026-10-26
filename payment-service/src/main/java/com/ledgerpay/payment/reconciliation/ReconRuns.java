@@ -104,13 +104,15 @@ public class ReconRuns {
         == 1;
   }
 
-  public void fail(UUID runId, String error) {
-    jdbc.sql(
-            """
+  /** Fails the run if it is still RUNNING; returns whether it was. */
+  public boolean fail(UUID runId, String error) {
+    return jdbc.sql(
+                """
             UPDATE recon_runs SET status = 'FAILED', error = ?, finished_at = now()
              WHERE id = ? AND status = 'RUNNING'""")
-        .params(error, runId)
-        .update();
+            .params(error, runId)
+            .update()
+        == 1;
   }
 
   /** The run is still being worked on; the sweeper leaves it alone while this keeps coming. */

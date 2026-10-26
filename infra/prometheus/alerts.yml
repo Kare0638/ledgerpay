@@ -73,7 +73,7 @@ groups:
   - name: reconciliation
     rules:
       - alert: ReconciliationRunFailed
-        expr: increase(recon_run_duration_seconds_count{status="failed"}[1h]) > 0
+        expr: increase(recon_runs_failed_total[1h]) > 0
         labels:
           severity: ticket
         annotations:
@@ -84,7 +84,7 @@ groups:
         labels:
           severity: ticket
         annotations:
-          summary: "The latest reconciliation run has {{ $value }} break(s)"
+          summary: "{{ $value }} reconciliation break(s) open in the latest run of each PSP and day"
           description: >-
             See GET /ops/recon-runs/{id}/items. STATUS_MISMATCH items are fixed by an inquiry and a
             new run; never by editing the books.

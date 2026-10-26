@@ -1,17 +1,32 @@
 package com.ledgerpay.payment.metrics;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.ledgerpay.payment.PostgresTestcontainersConfiguration;
 import com.ledgerpay.payment.api.ApiKeys;
+import com.ledgerpay.payment.ledger.integrity.LedgerIntegrity;
 import com.ledgerpay.payment.psp.PspOperationWorker;
 import com.ledgerpay.payment.psp.StubPsp;
 import com.ledgerpay.payment.psp.StubPsp.Reply;
+import com.ledgerpay.payment.reconciliation.BooksSnapshot;
+import com.ledgerpay.payment.reconciliation.ReconEngine;
+import com.ledgerpay.payment.reconciliation.ReconProperties;
+import com.ledgerpay.payment.reconciliation.ReconRuns;
+import com.ledgerpay.payment.settlement.SettlementReports;
 import com.ledgerpay.payment.webhook.InboxProcessor;
 import com.ledgerpay.payment.webhook.SignedWebhooks;
 import com.ledgerpay.payment.webhook.SignedWebhooks.Event;
+import java.time.Duration;
+import java.time.LocalDate;
+import java.util.Map;
 import java.util.UUID;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.RejectedExecutionException;
+import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.ThreadLocalRandom;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
@@ -29,6 +44,7 @@ import org.springframework.http.MediaType;
 import org.springframework.jdbc.core.simple.JdbcClient;
 import org.springframework.test.context.DynamicPropertyRegistry;
 import org.springframework.test.context.DynamicPropertySource;
+import org.springframework.transaction.support.TransactionTemplate;
 
 /**
  * The design's metrics (§13) on {@code /actuator/prometheus}, each moved by what it counts, and the
@@ -243,5 +259,123 @@ class MetricsIntegrationTest {
         "/ops/ledger-integrity-checks", HttpMethod.POST, new HttpEntity<>(headers), String.class);
 
     assertThat(output.getAll()).doesNotContain(OPS_KEY);
+  }
+
+  /** A settlement report and a completed run of it with these items per category. */
+  void completedRun(String psp, LocalDate day, int version, Map<String, Integer> items) {
+    UUID report = UUID.randomUUID();
+    jdbc.sql(
+            """
+            INSERT INTO settlement_reports (id, psp, business_date, file_sha256, version, status,
+                                            row_count)
+            VALUES (?, ?, ?, ?, ?, 'VALID', 0)""")
+        .params(report, psp, day, "sha_" + UUID.randomUUID(), version)
+        .update();
+    var categories = json.createObjectNode();
+    items.forEach((category, count) -> categories.putObject(category).put("items", count));
+    var summary = json.createObjectNode();
+    summary.set("categories", categories);
+    jdbc.sql(
+            """
+            INSERT INTO recon_runs (id, report_id, rules_version, status, snapshot_at, summary,
+                                    finished_at)
+            VALUES (?, ?, '1', 'COMPLETED', now(), ?::jsonb, clock_timestamp())""")
+        .params(UUID.randomUUID(), report, summary.toString())
+        .update();
+  }
+
+  double statusMismatches() {
+    return value(
+        scrape(), "recon_breaks{application=\"payment-service\",category=\"STATUS_MISMATCH\"}");
+  }
+
+  /**
+   * Breaks still open on one day are not hidden by a clean run of another day or another PSP; only
+   * a new run of that same day clears them.
+   */
+  @Test
+  void openBreaksOfOneDayStayVisibleWhateverRunsAfter() {
+    String psp = "psp-" + UUID.randomUUID().toString().substring(0, 8);
+    LocalDate day = LocalDate.of(2001, 1, 1).plusDays(ThreadLocalRandom.current().nextInt(30_000));
+    double before = statusMismatches();
+
+    completedRun(psp, day, 1, Map.of("MATCHED", 3, "STATUS_MISMATCH", 2));
+    assertThat(statusMismatches()).isEqualTo(before + 2);
+
+    completedRun(psp, day.minusDays(1), 1, Map.of("MATCHED", 5));
+    completedRun("other-" + psp, day, 1, Map.of("MATCHED", 4));
+    assertThat(statusMismatches()).as("other day and PSP clean").isEqualTo(before + 2);
+
+    completedRun(psp, day, 2, Map.of("MATCHED", 5));
+    assertThat(statusMismatches()).as("the same day run again").isEqualTo(before);
+  }
+
+  @Autowired ReconRuns runs;
+  @Autowired SettlementReports settlementReports;
+  @Autowired BooksSnapshot books;
+  @Autowired TransactionTemplate transactions;
+  @Autowired LedgerIntegrity integrity;
+  @Autowired PaymentMetrics metrics;
+
+  /** A run counts as failed once, where it becomes FAILED: here, a start the executor refuses. */
+  @Test
+  void aRunThatBecomesFailedIsCountedOnce() throws Exception {
+    String psp = "psp-" + UUID.randomUUID().toString().substring(0, 8);
+    UUID report = UUID.randomUUID();
+    jdbc.sql(
+            """
+            INSERT INTO settlement_reports (id, psp, business_date, file_sha256, version, status,
+                                            row_count)
+            VALUES (?, ?, DATE '2001-01-01', 'sha', 1, 'VALID', 0)""")
+        .params(report, psp)
+        .update();
+    ExecutorService closed = Executors.newVirtualThreadPerTaskExecutor();
+    closed.close();
+    ScheduledExecutorService heartbeat = Executors.newSingleThreadScheduledExecutor();
+    double before = value(scrape(), "recon_runs_failed_total{application=\"payment-service\"}");
+    try {
+      var engine =
+          new ReconEngine(
+              runs,
+              settlementReports,
+              books,
+              transactions,
+              closed,
+              heartbeat,
+              new ReconProperties(Duration.ofMinutes(10), Duration.ofMinutes(1)),
+              integrity,
+              metrics);
+      assertThatThrownBy(() -> engine.start(settlementReports.find(report).orElseThrow()))
+          .isInstanceOf(RejectedExecutionException.class);
+    } finally {
+      heartbeat.shutdownNow();
+    }
+    UUID runId = runs.forReport(report).getFirst().runId();
+    // Failing it again changes nothing, and counts nothing.
+    assertThat(runs.fail(runId, "again")).isFalse();
+
+    assertThat(value(scrape(), "recon_runs_failed_total{application=\"payment-service\"}"))
+        .isEqualTo(before + 1);
+  }
+
+  /**
+   * An operation set aside for review has its own alert; it does not also hold the oldest-pending
+   * age up for ever.
+   */
+  @Test
+  void theOldestPendingAgeLeavesOutOperationsSetAsideForReview() {
+    String payment = create("order-" + UUID.randomUUID(), 1_000);
+    jdbc.sql(
+            """
+            UPDATE psp_operations
+               SET needs_review = true, created_at = now() - interval '3650 days'
+             WHERE payment_id = ?::uuid""")
+        .param(payment)
+        .update();
+
+    assertThat(
+            value(
+                scrape(), "psp_operation_oldest_pending_seconds{application=\"payment-service\"}"))
+        .isLessThan(3650 * 86_400.0);
   }
 }

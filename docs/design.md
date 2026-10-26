@@ -818,17 +818,17 @@ Four single-fault report variants — duplicated P1 row, missing P3 row, P3 amou
 | `payments_total{operation, outcome}` | counter | PSP outcomes applied by the money transaction, counted after commit; a duplicate that changes nothing is not counted |
 | `http_server_requests_seconds{method, uri, status}` | histogram | API latency and errors (Spring's, with buckets for p99); stands in for the planned `payment_request_duration_seconds` |
 | `idempotency_replays_total` | counter | Requests answered from their stored response |
-| `psp_operations_pending`, `psp_operation_oldest_pending_seconds`, `psp_operations_needs_review` | gauges | PSP operations without an outcome, the oldest one's age, those set aside for review |
+| `psp_operations_pending`, `psp_operation_oldest_pending_seconds`, `psp_operations_needs_review` | gauges | PSP operations without an outcome, the oldest one's age (leaving out those set aside for review, which have their own alert), those set aside for review |
 | `psp_call_duration_seconds{operation, outcome}`, `psp_call_errors_total{operation}` | histogram, counter | PSP calls by how they ended: accepted, final, unknown; unknown is an error |
 | `inbox_quarantined_total`, `inbox_quarantined_events`, `webhook_signature_failures_total` | counter, gauge, counter | Webhooks quarantined (ever, and still waiting) and refused for their signature |
 | `outbox_unpublished_events`, `outbox_publish_lag_seconds`, `outbox_quarantined_events` | gauges | The outbox backlog, its oldest event's age, events the broker refused |
 | `refund_reserved_minor` | gauge | Refund amounts reserved and awaiting the PSP |
-| `recon_breaks{category}`, `recon_run_duration_seconds{status}` | gauge, histogram | Items per category in the latest completed run; runs by how they ended |
+| `recon_breaks{category}`, `recon_run_duration_seconds{status}`, `recon_runs_failed_total` | gauge, histogram, counter | Items per category summed over the latest completed run of each PSP and business day, so a clean run of one day cannot hide another's open breaks; runs this process carried out, by how they ended; runs that became FAILED, wherever (a failed run, a refused start, the sweeper), registered at 0 so the first one after a start is an increase |
 | `ledger_invariant_violations`, `ledger_integrity_checks_total{status}` | gauge, counter | The latest integrity check's violations (must always be 0) |
 | `webhook_deliveries_total{result}`, `notification_dead_lettered_total` | counters | notification-service: merchant webhooks delivered, without endpoint, failed, duplicate; events dead-lettered |
 | `kafka_consumer_fetch_manager_records_lag_max` | gauge | notification-service's consumer lag (Kafka client metrics) |
 
-**Dashboard** (`infra/grafana/dashboards/ledgerpay.json`, provisioned): money-safety tiles (ledger violations, operations needing review, quarantined webhooks, oldest pending operation, outbox backlog, reconciliation breaks), outcome throughput, API p99 and error rate, PSP call p99 and errors, outbox, merchant webhooks and dead letters, consumer lag, the latest run's categories and reserved refunds.
+**Dashboard** (`infra/grafana/dashboards/ledgerpay.json`, provisioned): money-safety tiles (ledger violations, operations needing review, quarantined webhooks, oldest pending operation, outbox backlog, reconciliation breaks), outcome throughput, API p99 and error rate, PSP call p99 and errors, outbox, merchant webhooks and dead letters, consumer lag, the latest run's categories (per PSP and day) and reserved refunds.
 
 **Logs:** JSON in Compose (Spring Boot's logstash format), with the MDC as fields: `traceId`, `idempotencyKey` and `paymentId` on API requests, `paymentId` and `pspRequestId` while a PSP call or an outcome is handled, `eventId` and `paymentId` in notification-service. API keys, signing secrets and auth headers are never logged; a test scans the output of requests that carry them.
 
@@ -837,13 +837,13 @@ Four single-fault report variants — duplicated P1 row, missing P3 row, P3 amou
 | Alert | Fires when | Severity |
 |---|---|---|
 | `LedgerInvariantViolated` | `ledger_invariant_violations > 0` | blocking |
-| `PspOperationPendingTooLong` | oldest pending operation over 5 minutes, for 1 minute | page |
+| `PspOperationPendingTooLong` | oldest pending operation not set aside for review over 5 minutes, for 1 minute | page |
 | `PspOperationNeedsReview` | any operation set aside for review | page |
 | `WebhookQuarantined` | any quarantined webhook | page |
 | `OutboxBacklog` | oldest unpublished event over a minute old, for 5 minutes | page |
 | `OutboxEventQuarantined` | any outbox event refused by the broker | page |
 | `EventDeadLettered` | a dead-lettered event in the last 10 minutes | page |
-| `ReconciliationRunFailed` | a failed run in the last hour | ticket |
+| `ReconciliationRunFailed` | an increase of `recon_runs_failed_total` in the last hour | ticket |
 | `ReconciliationBreaks` | any item not MATCHED in the latest completed run | ticket |
 | `ServiceDown` | a scrape target down for 1 minute | page |
 

@@ -26,6 +26,11 @@ public class PaymentMetrics {
     meters.counter("idempotency.replays");
     meters.counter("inbox.quarantined");
     meters.counter("webhook.signature.failures");
+    // Without these, the first failed run after a start would create the series at 1, and
+    // increase() over it would be 0: the alert would miss it.
+    meters.counter("recon.runs.failed");
+    reconRunTimer("completed");
+    reconRunTimer("failed");
     for (String operation : new String[] {"authorize", "capture", "void", "refund"}) {
       for (String outcome : new String[] {"succeeded", "failed"}) {
         meters.counter("payments", "operation", operation, "outcome", outcome);
@@ -97,12 +102,28 @@ public class PaymentMetrics {
     meters.counter("webhook.signature.failures").increment();
   }
 
-  /** A reconciliation run that finished: {@code recon_run_duration_seconds{status}}. */
+  /**
+   * How long a run this process carried out took, by how it ended: {@code
+   * recon_run_duration_seconds{status}}. A run the sweeper fails never gets here; {@link
+   * #reconRunsFailed} counts failures for alerting.
+   */
   public void reconRun(String status, Duration took) {
-    Timer.builder("recon.run.duration")
-        .description("Reconciliation runs by how they ended")
-        .tag("status", status.toLowerCase(Locale.ROOT))
-        .register(meters)
-        .record(took);
+    reconRunTimer(status.toLowerCase(Locale.ROOT)).record(took);
+  }
+
+  /**
+   * Runs that became FAILED, wherever that happened: an exception while running, a start the
+   * executor refused, or the sweeper giving up on a dead one. {@code recon_runs_failed_total}, the
+   * alert's input, so it matches the FAILED runs in recon_runs.
+   */
+  public void reconRunsFailed(int runs) {
+    meters.counter("recon.runs.failed").increment(runs);
+  }
+
+  private Timer reconRunTimer(String status) {
+    return Timer.builder("recon.run.duration")
+        .description("Reconciliation runs carried out, by how they ended")
+        .tag("status", status)
+        .register(meters);
   }
 }
