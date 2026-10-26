@@ -1,6 +1,7 @@
 package com.ledgerpay.payment.reconciliation;
 
 import com.ledgerpay.payment.ledger.integrity.LedgerIntegrity;
+import com.ledgerpay.payment.metrics.PaymentMetrics;
 import com.ledgerpay.payment.settlement.SettlementReport;
 import com.ledgerpay.payment.settlement.SettlementReports;
 import com.ledgerpay.payment.settlement.SettlementRow;
@@ -38,6 +39,7 @@ public class ReconEngine {
   private final ScheduledExecutorService heartbeat;
   private final Duration heartbeatInterval;
   private final LedgerIntegrity integrity;
+  private final PaymentMetrics metrics;
 
   public ReconEngine(
       ReconRuns runs,
@@ -47,7 +49,8 @@ public class ReconEngine {
       @Qualifier("reconExecutor") ExecutorService executor,
       @Qualifier("reconHeartbeat") ScheduledExecutorService heartbeat,
       ReconProperties properties,
-      LedgerIntegrity integrity) {
+      LedgerIntegrity integrity,
+      PaymentMetrics metrics) {
     this.runs = runs;
     this.reports = reports;
     this.books = books;
@@ -56,6 +59,7 @@ public class ReconEngine {
     this.heartbeat = heartbeat;
     this.heartbeatInterval = properties.heartbeatInterval();
     this.integrity = integrity;
+    this.metrics = metrics;
   }
 
   /** Starts a run of a VALID report; the caller has checked that it is one. */
@@ -70,7 +74,9 @@ public class ReconEngine {
     } catch (RejectedExecutionException e) {
       // Shutting down. The run is already stored, so fail it now rather than leave it looking in
       // progress until the sweeper gives up on it.
-      runs.fail(runId, "not started: " + e.getMessage());
+      if (runs.fail(runId, "not started: " + e.getMessage())) {
+        metrics.reconRunsFailed(1);
+      }
       throw e;
     }
     return runs.find(runId).orElseThrow();
@@ -80,6 +86,8 @@ public class ReconEngine {
     long every = heartbeatInterval.toMillis();
     ScheduledFuture<?> beating =
         heartbeat.scheduleAtFixedRate(() -> beat(runId), every, every, TimeUnit.MILLISECONDS);
+    long started = System.nanoTime();
+    String outcome = ReconRun.FAILED;
     try {
       List<SettlementRow> rows = reports.rows(report.reportId());
       BooksSnapshot.Snapshot snapshot = books.read(runId, report.reportId(), report.businessDate());
@@ -99,6 +107,7 @@ public class ReconEngine {
                     return false;
                   }));
       if (completed) {
+        outcome = ReconRun.COMPLETED;
         log.info(
             "Recon run {} of report {} ({} {} v{}) completed: {} items, {}",
             runId,
@@ -109,13 +118,17 @@ public class ReconEngine {
             items.size(),
             breaks(summary));
       } else {
+        // The sweeper failed it, and counted it then; this is not a second failure.
         log.warn("Recon run {} finished after it was given up as abandoned; result dropped", runId);
       }
     } catch (RuntimeException e) {
       log.error("Recon run {} failed", runId, e);
-      runs.fail(runId, e.getClass().getSimpleName() + ": " + e.getMessage());
+      if (runs.fail(runId, e.getClass().getSimpleName() + ": " + e.getMessage())) {
+        metrics.reconRunsFailed(1);
+      }
     } finally {
       beating.cancel(false);
+      metrics.reconRun(outcome, Duration.ofNanos(System.nanoTime() - started));
     }
   }
 

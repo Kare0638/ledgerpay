@@ -46,10 +46,14 @@ ledgerpay:
     api-key-hash: ${OPS_API_KEY_HASH:}
 
 management:
+  metrics:
+    tags:
+      # Every series says which service it is from, for one dashboard over all of them.
+      application: ${spring.application.name}
   endpoints:
     web:
       exposure:
-        include: health
+        include: health, prometheus
   endpoint:
     health:
       probes:

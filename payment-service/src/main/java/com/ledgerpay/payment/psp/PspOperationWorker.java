@@ -1,5 +1,6 @@
 package com.ledgerpay.payment.psp;
 
+import com.ledgerpay.payment.metrics.PaymentMetrics;
 import java.time.Duration;
 import java.util.List;
 import java.util.concurrent.ExecutionException;
@@ -8,6 +9,7 @@ import java.util.concurrent.Future;
 import java.util.concurrent.ThreadLocalRandom;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.slf4j.MDC;
 import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.stereotype.Component;
 
@@ -26,18 +28,21 @@ public class PspOperationWorker {
   private final PspOutcomeHandler outcomes;
   private final PspProperties properties;
   private final ExecutorService calls;
+  private final PaymentMetrics metrics;
 
   public PspOperationWorker(
       PspOperations operations,
       PspClient psp,
       PspOutcomeHandler outcomes,
       PspProperties properties,
-      @Qualifier(PspConfiguration.CALL_EXECUTOR) ExecutorService calls) {
+      @Qualifier(PspConfiguration.CALL_EXECUTOR) ExecutorService calls,
+      PaymentMetrics metrics) {
     this.operations = operations;
     this.psp = psp;
     this.outcomes = outcomes;
     this.properties = properties;
     this.calls = calls;
+    this.metrics = metrics;
   }
 
   /** Claims one batch, makes its PSP calls concurrently and returns how many were claimed. */
@@ -76,7 +81,29 @@ public class PspOperationWorker {
   }
 
   void process(ClaimedOperation operation) {
-    switch (call(operation)) {
+    try (var payment = MDC.putCloseable("paymentId", operation.paymentId().toString());
+        var request = MDC.putCloseable("pspRequestId", operation.pspRequestId())) {
+      process(operation, timedCall(operation));
+    }
+  }
+
+  private PspResult timedCall(ClaimedOperation operation) {
+    long started = System.nanoTime();
+    PspResult result = call(operation);
+    metrics.pspCall(
+        operation.type().name(),
+        switch (result) {
+          case PspResult.Accepted accepted -> "accepted";
+          case PspResult.Final outcome -> "final";
+          case PspResult.Unknown unknown -> "unknown";
+          case PspResult.NotFound notFound -> "not_found";
+        },
+        Duration.ofNanos(System.nanoTime() - started));
+    return result;
+  }
+
+  private void process(ClaimedOperation operation, PspResult result) {
+    switch (result) {
       case PspResult.Accepted accepted ->
           operations.markAccepted(
               operation.id(), accepted.pspReference(), properties.safetyNetDelay());

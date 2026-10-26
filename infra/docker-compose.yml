@@ -63,6 +63,7 @@ services:
       PSP_BASE_URL: http://mock-psp:8080
       PSP_WEBHOOK_SECRET: dev-only-webhook-secret
       KAFKA_BOOTSTRAP_SERVERS: kafka:29092
+      LOGGING_STRUCTURED_FORMAT_CONSOLE: logstash
       # SHA-256 of "dev-only-ops-key": settlement report uploads and inquiries under /ops locally.
       OPS_API_KEY_HASH: c5f26d1b51ffff2acca999b6bccfe9fde4b0d5ddc14505c79398837866bc572d
     ports:
@@ -84,6 +85,7 @@ services:
       SERVER_PORT: 8080
       DB_URL: jdbc:postgresql://postgres:5432/mockpsp
       PSP_WEBHOOK_URL: http://payment-service:8080/webhooks/psp
+      LOGGING_STRUCTURED_FORMAT_CONSOLE: logstash
       PSP_WEBHOOK_SECRET: dev-only-webhook-secret
       # Local stack only: enables /_admin/faults for fault injection (design §9.4).
       SPRING_PROFILES_ACTIVE: dev
@@ -104,6 +106,7 @@ services:
       SERVER_PORT: 8080
       DB_URL: jdbc:postgresql://postgres:5432/notification
       KAFKA_BOOTSTRAP_SERVERS: kafka:29092
+      LOGGING_STRUCTURED_FORMAT_CONSOLE: logstash
       # SHA-256 of "dev-only-ops-key", for registering merchant webhook endpoints locally.
       OPS_API_KEY_HASH: c5f26d1b51ffff2acca999b6bccfe9fde4b0d5ddc14505c79398837866bc572d
     ports:
@@ -139,6 +142,47 @@ services:
                 pass
 
         HTTPServer(("", 8080), Sink).serve_forever()
+
+  # Metrics and alerts (design §13, #22): scrapes both services with the local ops key and
+  # evaluates infra/prometheus/alerts.yml. Firing alerts at http://localhost:9090/alerts.
+  prometheus:
+    image: prom/prometheus:v3.5.0
+    restart: unless-stopped
+    volumes:
+      - ./prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ./prometheus/alerts.yml:/etc/prometheus/alerts.yml:ro
+    ports:
+      - "9090:9090"
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:9090/-/ready"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  # The LedgerPay dashboard, provisioned from infra/grafana: http://localhost:3000, open to view
+  # without signing in (admin / admin to edit).
+  grafana:
+    image: grafana/grafana:12.0.2
+    restart: unless-stopped
+    environment:
+      GF_AUTH_ANONYMOUS_ENABLED: "true"
+      GF_AUTH_ANONYMOUS_ORG_ROLE: Viewer
+      GF_DASHBOARDS_DEFAULT_HOME_DASHBOARD_PATH: /var/lib/grafana/dashboards/ledgerpay.json
+      GF_ANALYTICS_REPORTING_ENABLED: "false"
+      GF_ANALYTICS_CHECK_FOR_UPDATES: "false"
+    volumes:
+      - ./grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./grafana/dashboards:/var/lib/grafana/dashboards:ro
+    ports:
+      - "3000:3000"
+    depends_on:
+      prometheus:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:3000/api/health"]
+      interval: 5s
+      timeout: 3s
+      retries: 30
 
 volumes:
   postgres-data:

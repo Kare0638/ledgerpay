@@ -2,7 +2,7 @@
 
 A payment, double-entry ledger and settlement reconciliation service in Java 21 and Spring Boot, built around the failure modes that matter in payments: client retries, PSP timeouts with unknown outcomes, lost or duplicated webhooks, concurrent refunds, and books that disagree with the PSP's settlement report.
 
-> **Status (October 2026):** the core payment flow with partial refunds, the ledger, failure handling around the PSP and the event pipeline to signed merchant webhooks are built and tested, and the whole flow runs with one command ([quick start](#quick-start)). Reconciliation works end to end: the PSP's daily settlement report is imported and matched against the books item by item, and the ledger is checked against itself with every run. All 19 acceptance tests pass; property-based ledger tests and the demo data set are next. Progress is tracked on the [milestones](https://github.com/Kare0638/ledgerpay/milestones).
+> **Status (October 2026):** the core payment flow with partial refunds, the ledger, failure handling around the PSP and the event pipeline to signed merchant webhooks are built and tested, and the whole flow runs with one command ([quick start](#quick-start)). Reconciliation works end to end: the PSP's daily settlement report is imported and matched against the books item by item, and the ledger is checked against itself with every run. All 19 acceptance tests pass, 1,000 random payment histories keep the books consistent, and metrics, a dashboard and alert rules watch it all. A recorded walkthrough is next. Progress is tracked on the [milestones](https://github.com/Kare0638/ledgerpay/milestones).
 
 ## Built and tested
 
@@ -18,6 +18,7 @@ A payment, double-entry ledger and settlement reconciliation service in Java 21 
 - **Settlement reports imported whole or not at all**: mock-psp exports each UTC day's successful captures and refunds from its own records. The import validates every field of every row and stores the file as VALID with all its rows, or as INVALID with each error's line and column and no rows (AT-16). Re-sending a file returns the stored report, a corrected file becomes the next version, and versions are append-only. CSV is escaped against spreadsheet formulas ([ADR 0007](docs/adr/0007-reconciliation-never-mutates-the-ledger-utc-business-days.md)).
 - **Item-level reconciliation that only reads**: a run matches each report row to our operation by PSP reference, or by request ID, never by amount and time. Every row, and every operation that succeeded that day or that a row matched, ends up in exactly one category: MATCHED, DUPLICATE_EXTERNAL, MISSING_INTERNAL, MISSING_EXTERNAL, AMOUNT_MISMATCH (with a field-level diff) or STATUS_MISMATCH. Nets that agree cannot hide a break. Our side is read in one `REPEATABLE READ` snapshot, so a posting committed mid-run is not in it (AT-18). Runs are immutable and never touch the ledger. A lost webhook shows up as a STATUS_MISMATCH, is fixed through an inquiry, and the next run matches it while the first run is kept (AT-15, AT-17).
 - **A ledger integrity check independent of the PSP**: with every reconciliation run and on demand, the whole ledger is read in one snapshot and checked against itself. Every succeeded capture and refund has its journal; every journal is balanced and books exactly its operation's postings: the amount to this PSP's receivable, the merchant's share to that merchant, the fee to fee revenue, nothing elsewhere; all postings sum to zero; and each payment's captured and refunded amounts agree with the journals. A deleted journal or a corrupted total fails it even when the day's report matches to the penny (AT-19). A failure logs an error and raises `ledger_invariant_violations` on `/actuator/prometheus`.
+- **Metrics, a dashboard and alerts that watch the money**: Micrometer metrics for outcomes applied, idempotent replays, PSP call latency and failures, the oldest pending operation, operations needing review, quarantined webhooks, the outbox backlog, reserved refunds, reconciliation breaks and ledger violations, behind the ops key. A provisioned Grafana dashboard shows them, and ten Prometheus alert rules each have a `promtool` unit test. On the demo stack, a reconciliation break and a quarantined webhook fire their alerts while the ledger's stays quiet. Logs are JSON with `traceId`, `paymentId`, `pspRequestId` and `idempotencyKey`, and a test checks that no key or secret reaches them ([below](#metrics-dashboard-and-alerts)).
 - **A mock PSP with fault injection**: decline, timeout after commit, dropped, duplicated, out-of-order and delayed webhooks, used by acceptance tests that run payment-service against the real mock-psp process and PostgreSQL.
 - **CI quality gate**: every push runs the unit, Testcontainers and acceptance tests, and fails below 80 % line coverage in any module ([below](#running-the-tests)).
 - **Performance analysis**: a JMH benchmark of PSP calls on virtual threads against platform thread pools, and JFR recordings under k6 load ([below](#performance)).
@@ -28,8 +29,7 @@ Acceptance tests from the [design's list](docs/design.md): all 19 pass, AT-01 to
 
 | Milestone | What | Issues |
 |---|---|---|
-| M3: reconciliation and observability | Property-based ledger tests; a recorded walkthrough of the reconciliation demo | #20, #21 |
-| | Metrics, Grafana dashboard, alert rules, structured logs | #22 |
+| M3: reconciliation and observability | A recorded walkthrough of the reconciliation demo | #21 |
 | M4: performance and cloud | Published k6 results, Terraform for ECS Fargate and RDS | #23, #24 |
 | Optional | An LLM assistant that drafts analyses of reconciliation breaks; SQS/SNS adapter | #26, #25 |
 
@@ -50,9 +50,9 @@ See [docs/design.md](docs/design.md) for the full design: state machine, posting
 
 ## Tech stack
 
-Java 21 · Spring Boot 3 · PostgreSQL 16 · Flyway · Apache Kafka · Testcontainers · jqwik · JMH · JFR · k6 · Docker Compose
+Java 21 · Spring Boot 3 · PostgreSQL 16 · Flyway · Apache Kafka · Micrometer · Prometheus · Grafana · Testcontainers · jqwik · JMH · JFR · k6 · Docker Compose
 
-Planned: Micrometer / Prometheus / Grafana · Terraform · AWS (ECS Fargate, RDS)
+Planned: Terraform · AWS (ECS Fargate, RDS)
 
 ## Quick start
 
@@ -81,6 +81,19 @@ demo/run.sh
 ```
 
 One merchant's day with a real break ([`demo/`](demo/README.md)). P1 £100 is captured and £30 of it refunded, and two concurrent refunds then show one 409. P2's £200 capture webhook is lost, P3's outcome arrives twelve times, and P4 is declined. Reconciling mock-psp's report finds P2 as a `STATUS_MISMATCH`. An inquiry books it, and a second run is all `MATCHED`: captures 35000, refunds 3000, net 32000, and receivable 32000 = payable 31650 + revenue 350. Four single-fault variants of the report follow (duplicate row, missing row, amount 5100, unknown transaction). Every result is checked against a file in [`demo/expected/`](demo/expected/). It runs on a stack of its own, so stop the main one first.
+
+### Metrics, dashboard and alerts
+
+After `demo/run.sh`, on the same stack:
+
+```bash
+demo/alerts.sh                 # a break and a quarantined webhook fire their alerts; the ledger's stays quiet
+infra/prometheus/test.sh       # the alert rules' unit tests (promtool)
+```
+
+The dashboard is at http://localhost:3000 (no sign-in to view) and firing alerts at http://localhost:9090/alerts. Here it is after the reconciliation demo and `demo/alerts.sh`: one quarantined webhook, and one break left by the last report variant.
+
+![The LedgerPay Grafana dashboard after the reconciliation demo](docs/images/grafana-dashboard.png)
 
 ### The same flow by hand
 
@@ -169,12 +182,14 @@ Operation types are `AUTHORIZE`, `CAPTURE`, `VOID` and `REFUND`. Each fault also
 
 | Service | Port | Health |
 |---|---|---|
-| payment-service | 8080 | http://localhost:8080/actuator/health; metrics at `/actuator/prometheus` with the ops key (`ledger_invariant_violations` so far) |
+| payment-service | 8080 | http://localhost:8080/actuator/health; metrics at `/actuator/prometheus` with the ops key |
 | mock-psp | 8081 | http://localhost:8081/actuator/health |
 | notification-service | 8082 | http://localhost:8082/actuator/health; register a merchant endpoint with `PUT /ops/merchants/{id}/webhook-endpoint` and the local ops key `dev-only-ops-key` |
 | merchant-webhook-sink | — | Stands in for the merchant: `docker compose -f infra/docker-compose.yml logs merchant-webhook-sink` shows each signed delivery |
 | PostgreSQL 16 | 5432 | databases `ledgerpay`, `mockpsp` and `notification`, user and password `ledgerpay` |
 | Kafka (KRaft) | 9092 | `payments.events` (outbox relay → notification-service), `payments.events.dlq` |
+| Prometheus | 9090 | Scrapes both services every 5 s with the ops key; evaluates `infra/prometheus/alerts.yml` |
+| Grafana | 3000 | The provisioned LedgerPay dashboard; anonymous viewing, `admin` / `admin` to edit |
 
 Stop the stack with `docker compose -f infra/docker-compose.yml down`; add `-v` to delete its data.
 
