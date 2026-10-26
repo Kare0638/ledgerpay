@@ -12,6 +12,10 @@ set -euo pipefail
 
 IMAGE=ghcr.io/gitleaks/gitleaks:v8.30.1   # keep in step with .github/workflows/ci.yml
 repo=$(git rev-parse --show-toplevel)
+# In a worktree, .git is a file pointing into the main repository's .git directory. Both are mounted
+# at their own absolute paths, so git in the container can follow it: with only the worktree
+# mounted, gitleaks could not read the index, logged an error, exited 0, and nothing was scanned.
+common=$(cd "$repo" && cd "$(git rev-parse --git-common-dir)" && pwd)
 
 if ! docker info > /dev/null 2>&1; then
   echo "pre-commit: Docker is not running, so the staged changes were NOT scanned for secrets." >&2
@@ -19,11 +23,24 @@ if ! docker info > /dev/null 2>&1; then
   exit 0
 fi
 
-# The repository read-only, as the current user, so git inside the container trusts it.
-if ! docker run --rm --user "$(id -u):$(id -g)" -v "$repo:/repo:ro" -w /repo "$IMAGE" \
-    git --pre-commit --staged --config /repo/.gitleaks.toml --redact --verbose --no-banner --log-level warn /repo; then
-  echo >&2
-  echo "pre-commit: a secret is staged (above, redacted). Unstage it, move it to an environment" >&2
-  echo "            variable, and if it was ever pushed or shared, revoke it and make a new one." >&2
-  exit 1
-fi
+# Read-only, as the current user, so git inside the container trusts the repository. A finding
+# exits 3; any other failure (no image, no network, an unreadable repository) is the scan's own,
+# reported as such, and still stops the commit: a scan that did not run is not a clean one.
+status=0
+docker run --rm --user "$(id -u):$(id -g)" -v "$repo:$repo:ro" -v "$common:$common:ro" -w "$repo" \
+  "$IMAGE" git --pre-commit --staged --config "$repo/.gitleaks.toml" --redact --verbose \
+  --no-banner --log-level warn --exit-code 3 "$repo" || status=$?
+case $status in
+  0) ;;
+  3)
+    echo >&2
+    echo "pre-commit: a secret is staged (above, redacted). Unstage it, move it to an environment" >&2
+    echo "            variable, and if it was ever pushed or shared, revoke it and make a new one." >&2
+    exit 1
+    ;;
+  *)
+    echo "pre-commit: the secret scan itself failed (exit $status), so nothing was checked." >&2
+    echo "            Commit refused; fix the scan (is the image pullable?) and commit again." >&2
+    exit 1
+    ;;
+esac

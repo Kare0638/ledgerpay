@@ -14,8 +14,9 @@ not in a public issue.
 
 **Where they live.** Only in the environment of the process that needs them: your shell, or a
 GitHub Actions secret. Never in a tracked file: not `application.yml`, not `docker-compose.yml`, not a
-`.env` file (`.env`, `.env.*`, `*.env` and `.envrc` are git-ignored), and not baked into an image
-(the Dockerfiles take no `ARG` or `ENV` for them).
+`.env` file (`.env`, `.env.*`, `*.env` and `.envrc` are git-ignored), and not baked into an image:
+the Dockerfile takes no `ARG` or `ENV` for them, and `.dockerignore` keeps the same files out of
+the build context, which the build stage copies whole.
 
 The rules for any service that takes one (the first is the assistant, #26):
 
