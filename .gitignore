@@ -16,9 +16,13 @@ target/
 .vscode/
 .DS_Store
 
-# Environment and secrets
+# Environment and secrets: API keys such as GEMINI_API_KEY live in the environment, never in a
+# file here. scripts/git-hooks/pre-commit and CI scan for any that slip through (.gitleaks.toml).
 .env
+.env.*
+*.env
 *.env.local
+.envrc
 
 # Terraform
 .terraform/

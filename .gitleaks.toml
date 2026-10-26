@@ -1,0 +1,20 @@
+# Secret scanning (gitleaks v8.30.1): the pre-commit hook in scripts/git-hooks and the CI job use
+# this file. The default rules apply, including gcp-api-key, which matches Gemini API keys
+# (AIza...) wherever they appear, in a config value or a URL's ?key=.
+[extend]
+useDefault = true
+
+# Local development credentials that are public by design and work nowhere but a local stack:
+# the ops key every Compose stack and demo uses, and SHA-256 hashes of dev and test keys (only a
+# key's hash is ever configured). Listed one by one, so that a real secret that merely looks like
+# them is still found.
+[[allowlists]]
+description = "Local dev ops key and hashes of dev/test keys"
+regexTarget = "secret"
+regexes = [
+  '''^dev-only-ops-key$''',
+  '''^c5f26d1b51ffff2acca999b6bccfe9fde4b0d5ddc14505c79398837866bc572d$''',  # SHA-256 of dev-only-ops-key
+  '''^17da52acda373b82d53e6601abffb233bc9a735579df11d2c78596cfa5890134$''',  # SHA-256 of ops_test_key
+  '''^24e29f6f9b06174f48d833c5cd2db2966eea8e5edacb80e365e81388e8277fdc$''',  # SHA-256 of test-ops-key
+  '''^3e403c0f38cfcff86dfb134008739bdd2d914530ed0b0c397878cdb9de1a63d2$''',  # SHA-256 of ops_metrics_key_6d1f
+]

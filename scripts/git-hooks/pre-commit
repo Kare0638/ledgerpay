@@ -1,0 +1,29 @@
+#!/usr/bin/env bash
+# Refuses a commit whose staged changes hold a secret (an API key such as GEMINI_API_KEY, a token, a
+# private key), before it reaches the local history; GitHub's push protection only sees it at push.
+# Uses the gitleaks image through Docker, which the project needs anyway. Enable it once with:
+#
+#   git config core.hooksPath scripts/git-hooks
+#
+# A finding stops the commit with the file and line, the secret itself redacted. A false positive
+# that is public by design goes in .gitleaks.toml's allowlist; never commit with --no-verify to
+# get a real key in.
+set -euo pipefail
+
+IMAGE=ghcr.io/gitleaks/gitleaks:v8.30.1   # keep in step with .github/workflows/ci.yml
+repo=$(git rev-parse --show-toplevel)
+
+if ! docker info > /dev/null 2>&1; then
+  echo "pre-commit: Docker is not running, so the staged changes were NOT scanned for secrets." >&2
+  echo "            CI and GitHub push protection still will; start Docker to check before committing." >&2
+  exit 0
+fi
+
+# The repository read-only, as the current user, so git inside the container trusts it.
+if ! docker run --rm --user "$(id -u):$(id -g)" -v "$repo:/repo:ro" -w /repo "$IMAGE" \
+    git --pre-commit --staged --config /repo/.gitleaks.toml --redact --verbose --no-banner --log-level warn /repo; then
+  echo >&2
+  echo "pre-commit: a secret is staged (above, redacted). Unstage it, move it to an environment" >&2
+  echo "            variable, and if it was ever pushed or shared, revoke it and make a new one." >&2
+  exit 1
+fi
