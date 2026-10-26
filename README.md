@@ -44,6 +44,10 @@ Merchant ──▶ payment-service ──▶ PostgreSQL (source of truth for mon
 
 payment-service ──outbox relay──▶ Kafka payments.events ──▶ notification-service ──▶ signed merchant webhooks
                                                                    └─ after 3 retries ──▶ payments.events.dlq
+
+mock-psp ──daily settlement CSV──▶ payment-service: import ─▶ reconciliation run + ledger integrity check
+
+Prometheus ──scrapes with the ops key──▶ payment-service, notification-service ─▶ alert rules; Grafana dashboard
 ```
 
 See [docs/design.md](docs/design.md) for the full design: state machine, posting rules, schema, API, recovery paths, reconciliation rules and the acceptance test list.

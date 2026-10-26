@@ -60,7 +60,8 @@ UK payment and e-money institutions are expected by the FCA to reconcile the fun
  mock-psp ─webhook─▶│ WebhookController ─verify─▶ inbox_events ─▶ InboxProcessor                  │
   (HMAC-signed)     │                                              └▶ Tx②: final state + journal │
                     │                                                 + outbox + inbox processed │
-                    │ ReconciliationService ◀── settlement CSV ── mock-psp /reports/settlement │
+                    │ SettlementImporter ◀── settlement CSV ── mock-psp /reports/settlement     │
+                    │ ReconEngine (one snapshot) + LedgerIntegrityCheck → recon_runs, items     │
                     │ OutboxRelay (SKIP LOCKED) ──publish──┐                                    │
                     └──────────────────────────────────────┼────────────────────────────────────┘
                                                            ▼
@@ -72,10 +73,10 @@ UK payment and e-money institutions are expected by the FCA to reconcile the fun
 ```
 
 **Services**
-- `payment-service` — the core. Internal modules: payment, refund, ledger, psp (client and worker), webhook (inbox), reconciliation, outbox, idempotency.
+- `payment-service` — the core. Packages: `payment` (payments, refunds and the reservation, the money transaction), `ledger` (accounts, posting rules, the integrity check), `psp` (client and worker), `webhook` (inbox), `settlement` (report import), `reconciliation` (matching and runs), `outbox`, `idempotency`, `metrics`, `api` and `ops` (merchant and operations endpoints).
 - `notification-service` — consumes domain events and delivers merchant webhooks. It never touches money, so an outage delays notifications but cannot corrupt the ledger. That separation is the reason Kafka is used here.
 - `mock-psp` — a simulated upstream PSP with **its own schema and state**. Settlement reports are generated from its own records, never copied from our ledger, so reconciliation can find real differences.
-- `common` — event contracts, the `Money` type, HMAC signing utilities.
+- `common` — the `Money` type and fees, HMAC signing, RFC 4180 CSV with formula escaping.
 
 **Principles**
 1. **PostgreSQL is the single source of truth for money.** Kafka carries notifications only; it never holds balances or refundable amounts.
@@ -92,11 +93,11 @@ UK payment and e-money institutions are expected by the FCA to reconcile the fun
 | Language, framework | Java 21, Spring Boot 3.x (Web, JdbcClient, Validation, Actuator) |
 | Database | PostgreSQL 16, Flyway |
 | Messaging | Apache Kafka (KRaft, local), Spring Kafka |
-| Testing | JUnit 5, AssertJ, Testcontainers (PostgreSQL, Kafka), Awaitility, WireMock; jqwik for property-based tests |
+| Testing | JUnit 5, AssertJ, Testcontainers (PostgreSQL, Kafka), Awaitility, a scriptable stub PSP (`StubPsp`); jqwik for property-based tests; `promtool` for alert rules |
 | Observability | Micrometer, Prometheus, Grafana, JSON structured logs with trace IDs |
 | Load testing | k6 |
-| Deployment | Docker Compose, Terraform, AWS (ECR, ECS Fargate, RDS, CloudWatch, SSM Parameter Store) |
-| CI | GitHub Actions: build → unit tests → Testcontainers integration tests → JaCoCo coverage gate |
+| Deployment | Docker Compose; planned: Terraform, AWS (ECR, ECS Fargate, RDS, CloudWatch, SSM Parameter Store), #24 |
+| CI | GitHub Actions: build, unit, Testcontainers and acceptance tests, the JaCoCo gate (80 % per module); the two demos on Compose with the alerts check; the alert rules' unit tests |
 
 JdbcClient is preferred over JPA because `FOR UPDATE`, `SKIP LOCKED`, `RETURNING` and unique-violation handling need precise control over the SQL.
 
@@ -461,7 +462,7 @@ A merchant can read one account's balance: its own `merchant_payable:{merchantId
 
 `POST /ops/psp-operations/{id}/inquiry` makes a pending operation due now and clears `needs_review` and its consecutive failures, so the worker inquires on its next poll (section 9.1). While a worker holds the operation's lease it is 409 `INVALID_STATE`: the worker would overwrite the reset with the failure count it claimed, so the operator tries again once the call ends. A final operation is 409 too. It is how an operator retries an operation set aside for review.
 
-Every response carries a trace ID in the `X-Trace-Id` header, in the body of 202 responses and in every Problem Details body. It always identifies the current request: stored idempotent responses have no trace ID, and a replay gets its own. Until distributed tracing arrives (section 13), it is generated per request by a servlet filter and put in the logging MDC.
+Every response carries a trace ID in the `X-Trace-Id` header, in the body of 202 responses and in every Problem Details body. It always identifies the current request: stored idempotent responses have no trace ID, and a replay gets its own. There is no distributed tracing: it is generated per request by a servlet filter and put in the logging MDC, with the request's `Idempotency-Key` and the payment its path names (section 13).
 
 Every merchant write requires an `Idempotency-Key` header. A settlement report upload needs none: the file's SHA-256 makes it idempotent.
 
@@ -761,7 +762,7 @@ Each check is kept (`ledger_integrity_checks`, append-only, with the first 1,000
 | Integration | Full flows against real PostgreSQL; deferred constraint, unique constraints and append-only triggers actually fire | Testcontainers |
 | Property-based | ≥ 1,000 random payment / capture / void / partial-refund histories, refunds one at a time or two at once, each outcome delivered in the submit response, by webhook, duplicated, followed by a stale event, after a timeout and an inquiry, or before the call; after each: the ledger integrity check, refunded + reserved ≤ captured with nothing left reserved, and every answer, status, journal count and the merchant's balance against a model of the history (`PaymentHistoryPropertyTest`, #20). jqwik prints the failing seed and the shrunk history; CI runs 200 | jqwik |
 | Messaging | Rolled-back transaction leaves no outbox row; relay restart re-publishes; duplicate delivery processed once; poison message reaches DLQ | Testcontainers Kafka, Awaitility |
-| Fault injection | Acceptance tests below | mock-psp, WireMock |
+| Fault injection | Acceptance tests below | mock-psp, `StubPsp` |
 | CI | Full suite on every push; build fails below 80% line coverage | GitHub Actions, JaCoCo |
 
 ### Acceptance tests
@@ -929,46 +930,51 @@ ledgerpay/
 ├── README.md
 ├── docs/
 │   ├── design.md             # this document
-│   └── adr/
-├── common/                   # event contracts, Money, HMAC utilities
+│   ├── adr/                  # 0001–0008
+│   └── images/               # the dashboard screenshot
+├── common/                   # Money and fees, HMAC signing, CSV
 ├── payment-service/
 │   └── src/main/java/.../
-│       ├── api/              # controllers, DTOs, ProblemDetail, auth
-│       ├── payment/          # Payment, PaymentStatus, state machine
-│       ├── refund/           # Refund, reservation
-│       ├── ledger/           # accounts, posting rules, integrity checks
-│       ├── psp/              # PSP client, PspOperationWorker, inquiry
+│       ├── api/              # merchant API, ProblemDetail, auth filters, trace IDs
+│       ├── payment/          # payments, refunds and the reservation, state machine, money transaction
+│       ├── ledger/           # accounts, posting rules; integrity/ the ledger integrity check
+│       ├── psp/              # PSP client, PspOperationWorker, inquiry-first retries
 │       ├── webhook/          # verification, inbox, InboxProcessor
-│       ├── reconciliation/   # CSV import, matching, classification
-│       ├── outbox/           # OutboxRelay, EventPublisher and adapters
-│       └── idempotency/
-├── notification-service/
+│       ├── settlement/       # settlement report import and validation
+│       ├── reconciliation/   # snapshot, matching, classification, runs
+│       ├── outbox/           # OutboxRelay, EventPublisher and the Kafka adapter
+│       ├── idempotency/
+│       ├── metrics/          # event metrics and database gauges
+│       └── ops/              # operations endpoints
+├── notification-service/     # merchant webhooks from Kafka, DLQ
 ├── mock-psp/                 # simulated PSP, fault injection, settlement export
 ├── acceptance-tests/         # AT-xx across services: payment-service in-process, mock-psp as a process
-├── load-tests/               # k6 scripts
+├── load-tests/               # k6 scenario and the JFR recording under load
 ├── benchmarks/               # JMH benchmarks
-├── demo/                     # demo data, report variants, expected results
+├── demo/                     # the reconciliation demo, expected results, the alerts check
+├── scripts/                  # demo.sh (the happy path in one command), lib.sh
 ├── infra/
-│   ├── docker-compose.yml
-│   ├── prometheus/alerts.yml
-│   └── terraform/
-└── .github/workflows/ci.yml
+│   ├── docker-compose.yml    # the stack, Prometheus and Grafana
+│   ├── prometheus/           # scrape config, alerts.yml and its unit tests
+│   ├── grafana/              # provisioning and the LedgerPay dashboard
+│   └── terraform/            # planned (#24)
+└── .github/workflows/        # ci.yml, benchmarks.yml
 ```
 
-### Planned ADRs
+### Architecture decisions
 
 | ADR | Decision |
 |---|---|
-| 0001 | Money as integer minor units; HALF_UP fee rounding |
-| 0002 | Idempotency via database unique constraints, three layers |
-| 0003 | No ledger postings on authorisation or void |
-| 0004 | Unknown outcomes: inquire before any retry, fixed request IDs ([accepted](adr/0004-unknown-outcomes-inquire-before-retry.md)) |
-| 0005 | Refund reservation with pessimistic locking ([accepted](adr/0005-refund-reservation-with-pessimistic-locking.md)) |
-| 0006 | Transactional outbox; at-least-once delivery with idempotent consumers ([accepted](adr/0006-transactional-outbox-at-least-once.md)) |
-| 0007 | Reconciliation never mutates the ledger; UTC business days ([accepted](adr/0007-reconciliation-never-mutates-the-ledger-utc-business-days.md)) |
-| 0008 | Executor for PSP calls: virtual threads vs a platform thread pool, based on the JMH results |
+| [0001](adr/0001-money-as-integer-minor-units.md) | Money as integer minor units; HALF_UP fee rounding |
+| [0002](adr/0002-idempotency-via-database-unique-constraints.md) | Idempotency via database unique constraints, three layers |
+| [0003](adr/0003-no-postings-on-authorisation-or-void.md) | No ledger postings on authorisation or void |
+| [0004](adr/0004-unknown-outcomes-inquire-before-retry.md) | Unknown outcomes: inquire before any retry, fixed request IDs |
+| [0005](adr/0005-refund-reservation-with-pessimistic-locking.md) | Refund reservation with pessimistic locking |
+| [0006](adr/0006-transactional-outbox-at-least-once.md) | Transactional outbox; at-least-once delivery with idempotent consumers |
+| [0007](adr/0007-reconciliation-never-mutates-the-ledger-utc-business-days.md) | Reconciliation never mutates the ledger; UTC business days; reports kept as versions |
+| [0008](adr/0008-virtual-threads-for-psp-calls.md) | Virtual threads for PSP calls, chosen on the JMH results |
 
-Each ADR records context and constraints, the decision, rejected alternatives, trade-offs and the tests that cover it.
+All are accepted. Each ADR records context and constraints, the decision, rejected alternatives, trade-offs and the tests that cover it.
 
 ---
 
@@ -976,12 +982,12 @@ Each ADR records context and constraints, the decision, rejected alternatives, t
 
 Work is tracked as [GitHub milestones](https://github.com/Kare0638/ledgerpay/milestones), one issue per deliverable, each linked to its acceptance tests.
 
-| Milestone | Contents | Exit criteria |
-|---|---|---|
-| **M1 — Ledger and core flow** | Multi-module Maven build, Compose, Flyway V1–V2; Money, fees, state machine; ledger with deferred balance constraint and append-only triggers; idempotency; mock-psp happy path; PspOperationWorker; webhook inbox; money transaction | AT-01 – AT-05 |
-| **M2 — Failure handling and events** | Fault injection; inquiry-first retries and backoff; partial refunds with reservation; outbox, relay, Kafka; notification-service with DLQ; CI with coverage gate; ADR 0001–0006 | AT-06 – AT-14; `docker compose up` runs the full flow |
-| **M3 — Reconciliation and observability** | Settlement export and import; classification; ledger integrity check; demo data and variants; metrics, dashboard, alert rules; ADR 0007 | AT-15 – AT-19; recorded end-to-end demo |
-| **M4 — Performance and cloud** | k6 scenarios; Terraform deployment to AWS; optional SQS adapter and reconciliation assistant | Published load-test results; deployment evidence |
-| **M5 — Performance analysis** | JMH benchmark of PSP dispatch on virtual threads vs a platform thread pool; JFR recording under k6 load, analysed for GC pauses and lock contention; ADR 0008 | Benchmark results and JFR findings in the README (section 14.1) |
+| Milestone | Contents | Exit criteria | Status |
+|---|---|---|---|
+| **M1 — Ledger and core flow** | Multi-module Maven build, Compose, Flyway V1–V2; Money, fees, state machine; ledger with deferred balance constraint and append-only triggers; idempotency; mock-psp happy path; PspOperationWorker; webhook inbox; money transaction | AT-01 – AT-05 | Done |
+| **M2 — Failure handling and events** | Fault injection; inquiry-first retries and backoff; partial refunds with reservation; outbox, relay, Kafka; notification-service with DLQ; CI with coverage gate; ADR 0001–0006 | AT-06 – AT-14; `docker compose up` runs the full flow | Done: `scripts/demo.sh` |
+| **M3 — Reconciliation and observability** | Settlement export and import; classification; ledger integrity check; property-based ledger tests; demo data and variants; metrics, dashboard, alert rules, JSON logs; ADR 0007 | AT-15 – AT-19; recorded end-to-end demo | All but the recording: AT-15 – AT-19 pass, `demo/run.sh` (#21) |
+| **M4 — Performance and cloud** | k6 scenarios; Terraform deployment to AWS; optional SQS adapter and reconciliation assistant | Published load-test results; deployment evidence | Open: #23, #24; optional #25, #26 |
+| **M5 — Performance analysis** | JMH benchmark of PSP dispatch on virtual threads vs a platform thread pool; JFR recording under k6 load, analysed for GC pauses and lock contention; ADR 0008 | Benchmark results and JFR findings in the README (section 14.1) | Done |
 
 Idempotency, inquiry-first retries, refund reservation, database-enforced ledger invariants and reconciliation are the core of the project and are not traded away for schedule.
