@@ -100,3 +100,19 @@ jobs:
 
       - name: Test the alert rules
         run: infra/prometheus/test.sh
+
+  # Every commit of the branch, not just the last, against .gitleaks.toml: a key committed and then
+  # deleted is still in the history, and still has to be revoked. The pre-commit hook in
+  # scripts/git-hooks catches it earlier, and GitHub's push protection at push.
+  secrets:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Scan the history for secrets
+        run: |
+          docker run --rm --user "$(id -u):$(id -g)" -v "$PWD:/repo:ro" \
+            ghcr.io/gitleaks/gitleaks:v8.30.1 \
+            git /repo --config /repo/.gitleaks.toml --redact --verbose --no-banner
