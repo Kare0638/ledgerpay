@@ -12,8 +12,19 @@ not in a public issue.
 
 ## Secrets
 
-**Where they live.** Only in the environment of the process that needs them: your shell, or a
-GitHub Actions secret. Never in a tracked file: not `application.yml`, not `docker-compose.yml`, not a
+**Where they live.** In a file outside the repository, readable by you alone, loaded only into the
+command that needs it; or a GitHub Actions secret. For the Gemini key:
+
+```bash
+mkdir -p ~/.config/ledgerpay
+printf 'export GEMINI_API_KEY=%s\n' 'AQ.…' > ~/.config/ledgerpay/gemini.env   # or edit it by hand
+chmod 600 ~/.config/ledgerpay/gemini.env
+scripts/with-gemini.sh ./mvnw …     # the key is set for this command only
+```
+
+`scripts/with-gemini.sh` refuses a file inside the repository or readable by others, and passes on
+the key alone. Exporting it from `~/.bashrc` would hand it to every process started from a shell:
+build plugins, package install scripts and editor extensions inherit the environment. Never in a tracked file: not `application.yml`, not `docker-compose.yml`, not a
 `.env` file (`.env`, `.env.*`, `*.env` and `.envrc` are git-ignored), and not baked into an image:
 the Dockerfile takes no `ARG` or `ENV` for them, and `.dockerignore` keeps the same files out of
 the build context, which the build stage copies whole.
@@ -41,17 +52,22 @@ local stack. They are listed one by one in `.gitleaks.toml`.
 Three layers, each catching what the one before missed:
 
 1. **Pre-commit hook** (`scripts/git-hooks/pre-commit`): scans the staged changes with
-   [gitleaks](https://github.com/gitleaks/gitleaks) through Docker and refuses the commit, so a key
-   never enters the local history. Enable it once per clone:
+   [gitleaks](https://github.com/gitleaks/gitleaks), through Docker or a local `gitleaks`, and
+   refuses the commit, so a key never enters the local history. It fails closed: with neither
+   scanner available, or a scan that did not run, the commit is refused.
+   `LEDGERPAY_SKIP_SECRET_SCAN=1` skips it on purpose for one command. Enable it once per clone:
 
    ```bash
    git config core.hooksPath scripts/git-hooks
    ```
 
-2. **GitHub push protection**: secret scanning with push protection is on for this repository, and
-   refuses a push that contains a recognised key, Google API keys included.
+2. **GitHub push protection**: on for this repository. It refuses a push with a key in a format
+   it recognises, the classic `AIza…` Google API key among them, but **not** AI Studio's `AQ.…`
+   keys: a test push of a fake one went through (2026-10-26). For those keys the hook is the only
+   check before publication.
 3. **CI** (`secrets` job): scans every commit of the branch with the same `.gitleaks.toml`, so a key
-   committed and then deleted is still found.
+   committed and then deleted is still found. It runs after the push: in a public repository the
+   key is already published by then, and must be revoked.
 
 Google issues Gemini keys in two formats, and both are found anywhere, a bare string included: the
 classic `AIza…` by gitleaks' default rule `gcp-api-key`, and Google AI Studio's newer `AQ.…` by the
