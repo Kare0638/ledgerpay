@@ -8,7 +8,8 @@ LedgerPay-*.md
 # The build stage copies the whole context (COPY . .): a local .env with an API key such as
 # GEMINI_API_KEY must not reach it, even though only the jar goes into the final image. Its layers
 # stay in the build cache, which can be exported to a registry.
-.env
-.env.*
-*.env
-.envrc
+# Patterns here are relative to the context root, unlike .gitignore's: **/ covers every module.
+**/.env
+**/.env.*
+**/*.env
+**/.envrc
