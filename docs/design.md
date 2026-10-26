@@ -61,7 +61,8 @@ UK payment and e-money institutions are expected by the FCA to reconcile the fun
   (HMAC-signed)     │                                              └▶ Tx②: final state + journal │
                     │                                                 + outbox + inbox processed │
                     │ SettlementImporter ◀── settlement CSV ── mock-psp /reports/settlement     │
-                    │ ReconEngine (one snapshot) + LedgerIntegrityCheck → recon_runs, items     │
+                    │ ReconEngine (one snapshot) → recon_runs, items                            │
+                    │   then LedgerIntegrityCheck (own snapshot) → ledger_integrity_checks      │
                     │ OutboxRelay (SKIP LOCKED) ──publish──┐                                    │
                     └──────────────────────────────────────┼────────────────────────────────────┘
                                                            ▼
@@ -97,7 +98,7 @@ UK payment and e-money institutions are expected by the FCA to reconcile the fun
 | Observability | Micrometer, Prometheus, Grafana, JSON structured logs with trace IDs |
 | Load testing | k6 |
 | Deployment | Docker Compose; planned: Terraform, AWS (ECR, ECS Fargate, RDS, CloudWatch, SSM Parameter Store), #24 |
-| CI | GitHub Actions: build, unit, Testcontainers and acceptance tests, the JaCoCo gate (80 % per module); the two demos on Compose with the alerts check; the alert rules' unit tests |
+| CI | GitHub Actions: build, unit, Testcontainers and acceptance tests, the JaCoCo gate (80 % per service and library module; `benchmarks` is not measured); the two demos on Compose with the alerts check; the alert rules' unit tests; a gitleaks scan of every commit for secrets (`SECURITY.md`) |
 
 JdbcClient is preferred over JPA because `FOR UPDATE`, `SKIP LOCKED`, `RETURNING` and unique-violation handling need precise control over the SQL.
 
@@ -462,7 +463,7 @@ A merchant can read one account's balance: its own `merchant_payable:{merchantId
 
 `POST /ops/psp-operations/{id}/inquiry` makes a pending operation due now and clears `needs_review` and its consecutive failures, so the worker inquires on its next poll (section 9.1). While a worker holds the operation's lease it is 409 `INVALID_STATE`: the worker would overwrite the reset with the failure count it claimed, so the operator tries again once the call ends. A final operation is 409 too. It is how an operator retries an operation set aside for review.
 
-Every response carries a trace ID in the `X-Trace-Id` header, in the body of 202 responses and in every Problem Details body. It always identifies the current request: stored idempotent responses have no trace ID, and a replay gets its own. There is no distributed tracing: it is generated per request by a servlet filter and put in the logging MDC, with the request's `Idempotency-Key` and the payment its path names (section 13).
+Every response carries a trace ID in the `X-Trace-Id` header, in the body of 202 responses and in every Problem Details body. It always identifies the current request: stored idempotent responses have no trace ID, and a replay gets its own. There is no distributed tracing: a servlet filter generates it per request and puts it in the logging MDC. The same filter also puts there the request's `Idempotency-Key`, cut to its first 255 characters, and the payment ID when the path names one (section 13).
 
 Every merchant write requires an `Idempotency-Key` header. A settlement report upload needs none: the file's SHA-256 makes it idempotent.
 
@@ -928,6 +929,8 @@ Guardrails: the LLM can only *propose* an inquiry, which a human must confirm; i
 ```
 ledgerpay/
 ├── README.md
+├── SECURITY.md               # where secrets live, the scanning layers, what to do if one leaks
+├── .gitleaks.toml            # secret scanning rules and the allowlist of public dev values
 ├── docs/
 │   ├── design.md             # this document
 │   ├── adr/                  # 0001–0008
@@ -953,8 +956,11 @@ ledgerpay/
 ├── benchmarks/               # JMH benchmarks
 ├── demo/                     # the reconciliation demo, expected results, the alerts check
 ├── scripts/                  # demo.sh (the happy path in one command), lib.sh
+│   └── git-hooks/            # pre-commit: gitleaks on the staged changes
 ├── infra/
 │   ├── docker-compose.yml    # the stack, Prometheus and Grafana
+│   ├── docker-compose.perf.yml # override for the JFR recording under load (section 14.1)
+│   ├── postgres/             # init.sql: one database per service
 │   ├── prometheus/           # scrape config, alerts.yml and its unit tests
 │   ├── grafana/              # provisioning and the LedgerPay dashboard
 │   └── terraform/            # planned (#24)
@@ -966,13 +972,13 @@ ledgerpay/
 | ADR | Decision |
 |---|---|
 | [0001](adr/0001-money-as-integer-minor-units.md) | Money as integer minor units; HALF_UP fee rounding |
-| [0002](adr/0002-idempotency-via-database-unique-constraints.md) | Idempotency via database unique constraints, three layers |
+| [0002](adr/0002-idempotency-via-database-unique-constraints.md) | Idempotency via database unique constraints, in three layers |
 | [0003](adr/0003-no-postings-on-authorisation-or-void.md) | No ledger postings on authorisation or void |
-| [0004](adr/0004-unknown-outcomes-inquire-before-retry.md) | Unknown outcomes: inquire before any retry, fixed request IDs |
+| [0004](adr/0004-unknown-outcomes-inquire-before-retry.md) | Unknown outcomes: inquire before any retry, with fixed request IDs |
 | [0005](adr/0005-refund-reservation-with-pessimistic-locking.md) | Refund reservation with pessimistic locking |
 | [0006](adr/0006-transactional-outbox-at-least-once.md) | Transactional outbox; at-least-once delivery with idempotent consumers |
 | [0007](adr/0007-reconciliation-never-mutates-the-ledger-utc-business-days.md) | Reconciliation never mutates the ledger; UTC business days; reports kept as versions |
-| [0008](adr/0008-virtual-threads-for-psp-calls.md) | Virtual threads for PSP calls, chosen on the JMH results |
+| [0008](adr/0008-virtual-threads-for-psp-calls.md) | Virtual threads for PSP calls |
 
 All are accepted. Each ADR records context and constraints, the decision, rejected alternatives, trade-offs and the tests that cover it.
 
