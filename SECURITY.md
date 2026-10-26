@@ -53,8 +53,10 @@ Three layers, each catching what the one before missed:
 3. **CI** (`secrets` job): scans every commit of the branch with the same `.gitleaks.toml`, so a key
    committed and then deleted is still found.
 
-gitleaks' default rules include `gcp-api-key`, which matches Gemini keys (`AIza…`) in a configuration
-value or in a URL's `?key=`. A false positive that is public by design goes in the allowlist in
+Google issues Gemini keys in two formats, and both are found anywhere, a bare string included: the
+classic `AIza…` by gitleaks' default rule `gcp-api-key`, and Google AI Studio's newer `AQ.…` by the
+rule `google-ai-studio-key` in `.gitleaks.toml`, which no default rule covers (the generic one only
+finds it next to a word like "key"). A false positive that is public by design goes in the allowlist in
 `.gitleaks.toml`; never bypass the hook with `--no-verify` to commit a real key.
 
 ## If a key leaks
@@ -62,7 +64,7 @@ value or in a URL's `?key=`. A false positive that is public by design goes in t
 1. **Revoke it first**, then create a new one (for Gemini: delete it in Google AI Studio). Rewriting git
    history does not help once a key has been pushed or shared: copies may already exist.
 2. Put the new key in your environment only.
-3. Find where it went: `git log -p --all | grep -n 'AIza'`, the CI logs, and any chat or issue it was
+3. Find where it went: `git log -p --all | grep -nE 'AIza|AQ\.'`, the CI logs, and any chat or issue it was
    pasted into.
 
 ## Limiting the damage

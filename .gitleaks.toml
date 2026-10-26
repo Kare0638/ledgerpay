@@ -1,8 +1,17 @@
 # Secret scanning (gitleaks v8.30.1): the pre-commit hook in scripts/git-hooks and the CI job use
-# this file. The default rules apply, including gcp-api-key, which matches Gemini API keys
-# (AIza...) wherever they appear, in a config value or a URL's ?key=.
+# this file. The default rules apply, including gcp-api-key, which matches the classic Google API
+# key format (AIza...) wherever it appears, in a config value or a URL's ?key=.
 [extend]
 useDefault = true
+
+# Google AI Studio now issues Gemini keys in another format, AQ. and about 50 characters, which no
+# default rule names. generic-api-key finds one next to a word like "key", but not a bare string;
+# this rule finds it anywhere.
+[[rules]]
+id = "google-ai-studio-key"
+description = "Google AI Studio (Gemini) API key, AQ. format"
+regex = '''\bAQ\.[A-Za-z0-9_-]{40,64}\b'''
+keywords = ["AQ."]
 
 # Local development credentials that are public by design and work nowhere but a local stack:
 # the ops key every Compose stack and demo uses, and SHA-256 hashes of dev and test keys (only a
