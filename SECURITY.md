@@ -17,14 +17,25 @@ command that needs it; or a GitHub Actions secret. For the Gemini key:
 
 ```bash
 mkdir -p ~/.config/ledgerpay
-printf 'export GEMINI_API_KEY=%s\n' 'AQ.…' > ~/.config/ledgerpay/gemini.env   # or edit it by hand
-chmod 600 ~/.config/ledgerpay/gemini.env
+# bash: typed at a hidden prompt, so the key is in no command line and no shell history. Empty
+# input leaves a working file alone. umask 077 covers a new file, chmod 600 one that already was
+# readable by others. (zsh's read differs: there, use read -rs 'k?Gemini key: '.)
+(umask 077; read -rsp 'Gemini key: ' k; echo
+ [[ -n $k ]] || { echo 'no key typed; nothing changed' >&2; exit 1; }
+ printf 'export GEMINI_API_KEY=%s\n' "$k" > ~/.config/ledgerpay/gemini.env
+ chmod 600 ~/.config/ledgerpay/gemini.env)
 scripts/with-gemini.sh ./mvnw …     # the key is set for this command only
 ```
 
+Never put the key itself on a command line, `printf '…AQ.…'` or `export GEMINI_API_KEY=AQ.…`
+included: the shell writes it to `~/.bash_history`. If one already did, delete that line with every
+other terminal closed (an open shell writes its history back when it exits).
+
 `scripts/with-gemini.sh` refuses a file inside the repository or readable by others, and passes on
 the key alone. Exporting it from `~/.bashrc` would hand it to every process started from a shell:
-build plugins, package install scripts and editor extensions inherit the environment. Never in a tracked file: not `application.yml`, not `docker-compose.yml`, not a
+build plugins, package install scripts and editor extensions inherit the environment.
+
+Never in a tracked file: not `application.yml`, not `docker-compose.yml`, not a
 `.env` file (`.env`, `.env.*`, `*.env` and `.envrc` are git-ignored), and not baked into an image:
 the Dockerfile takes no `ARG` or `ENV` for them, and `.dockerignore` keeps the same files out of
 the build context, which the build stage copies whole.
@@ -49,23 +60,36 @@ local stack. They are listed one by one in `.gitleaks.toml`.
 
 ## Scanning
 
-Three layers, each catching what the one before missed:
+Four layers, each catching what the one before missed:
 
 1. **Pre-commit hook** (`scripts/git-hooks/pre-commit`): scans the staged changes with
    [gitleaks](https://github.com/gitleaks/gitleaks), through Docker or a local `gitleaks`, and
    refuses the commit, so a key never enters the local history. It fails closed: with neither
    scanner available, or a scan that did not run, the commit is refused.
-   `LEDGERPAY_SKIP_SECRET_SCAN=1` skips it on purpose for one command. Enable it once per clone:
+   `LEDGERPAY_SKIP_SECRET_SCAN=1` skips it on purpose for one command. Enable the hooks once per
+   clone:
 
    ```bash
-   git config core.hooksPath scripts/git-hooks
+   git config core.hooksPath "$(git rev-parse --show-toplevel)/scripts/git-hooks"
    ```
 
-2. **GitHub push protection**: on for this repository. It refuses a push with a key in a format
+   The path is absolute on purpose. A relative `scripts/git-hooks` is looked up in the working tree
+   that runs the hook, so a git worktree checked out at an older commit runs that commit's hooks, or
+   none: a test push from a worktree on a commit before the pre-push hook existed published a fake
+   key. With the absolute path every worktree uses the main checkout's hooks, and the scan reads its
+   rules from there too, so a worktree on an old commit cannot scan with old rules. The one gap
+   left: if the main checkout itself is on a commit from before a hook existed, git skips that hook
+   without a word.
+
+2. **Pre-push hook** (`scripts/git-hooks/pre-push`): scans every commit the push would publish
+   (what no remote-tracking branch has yet) and refuses the push, with the same scanner and the
+   same fail-closed rule. It catches what pre-commit never saw: commits made before the hooks were
+   enabled in a clone, with `--no-verify`, or by a rebase or cherry-pick.
+3. **GitHub push protection**: on for this repository. It refuses a push with a key in a format
    it recognises, the classic `AIza…` Google API key among them, but **not** AI Studio's `AQ.…`
-   keys: a test push of a fake one went through (2026-10-26). For those keys the hook is the only
-   check before publication.
-3. **CI** (`secrets` job): scans every commit of the branch with the same `.gitleaks.toml`, so a key
+   keys: a test push of a fake one went through (2026-10-26). For those keys the two hooks are the
+   only checks before publication, and a commit made in GitHub's web editor bypasses both.
+4. **CI** (`secrets` job): scans every commit of the branch with the same `.gitleaks.toml`, so a key
    committed and then deleted is still found. It runs after the push: in a public repository the
    key is already published by then, and must be revoked.
 

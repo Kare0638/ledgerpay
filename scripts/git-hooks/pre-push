@@ -1,0 +1,38 @@
+#!/usr/bin/env bash
+# Refuses a push whose new commits hold a secret: the last check before the repository, which is
+# public, publishes them. GitHub's push protection misses some key formats (AI Studio's AQ. keys),
+# and the pre-commit hook misses commits it never saw: made before the hooks were enabled in a
+# clone, with --no-verify, or by a rebase or cherry-pick. Enabled with the other hooks:
+#
+#   git config core.hooksPath "$(git rev-parse --show-toplevel)/scripts/git-hooks"
+#
+# It scans every commit the pushed refs bring that the remote has no tracking branch for yet,
+# which is what this push publishes there (CI scans the whole history on every push). The hooks
+# and their rules are the main checkout's (core.hooksPath is absolute): if that checkout is on a
+# commit from before a hook existed, git finds no hook and skips it without a word.
+set -euo pipefail
+
+# $1 is the remote's name, or its URL when pushing to one directly. Commits on that remote's
+# tracking branches were published before and are not scanned again; a commit only another remote
+# has is, since this push publishes it here. With a URL, no tracking branch matches, so every
+# commit the refs bring is scanned.
+remote=$1
+
+# Every pushed ref's tip in one scan, so git push --all starts one container, not one per ref.
+tips=()
+while read -r local_ref local_sha remote_ref remote_sha; do
+  # A deleted ref publishes nothing.
+  [[ $local_sha =~ ^0+$ ]] || tips+=("$local_sha")
+done
+(( ${#tips[@]} )) || exit 0
+
+status=0
+"$(dirname "$0")/scan-secrets" pre-push --log-opts="${tips[*]} --not --remotes=$remote" \
+  || status=$?
+if (( status == 3 )); then
+  echo >&2
+  echo "pre-push: a commit being pushed holds a secret (above, redacted). Nothing was published." >&2
+  echo "          Remove it from those commits (git rebase -i, or reset and commit again), move it to" >&2
+  echo "          an environment variable, then push again." >&2
+fi
+(( status == 0 )) || exit 1
