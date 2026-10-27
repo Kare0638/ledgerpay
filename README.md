@@ -1,6 +1,6 @@
 # LedgerPay
 
-A payment, double-entry ledger and settlement reconciliation service in Java 21 and Spring Boot, built around the failure modes that matter in payments: client retries, PSP timeouts with unknown outcomes, lost or duplicated webhooks, concurrent refunds, and books that disagree with the PSP's settlement report.
+A payment, double-entry ledger and settlement reconciliation service in Java 21 and Spring Boot, built around the failure modes that matter in payments: client retries, PSP timeouts with unknown outcomes, lost or duplicated webhooks, concurrent refunds, and books that disagree with the PSP's settlement report. On top of reconciliation sits an LLM agent with retrieval-augmented generation (RAG) that analyses each break and may only propose a fix for a person to approve ([below](#ai-engineering-a-tool-calling-agent-with-rag)).
 
 > **Status (October 2026):** the core payment flow with partial refunds, the ledger, failure handling around the PSP and the event pipeline to signed merchant webhooks are built and tested, and the whole flow runs with one command ([quick start](#quick-start)). Reconciliation works end to end: the PSP's daily settlement report is imported and matched against the books item by item, and the ledger is checked against itself with every run. All 19 acceptance tests pass, 1,000 random payment histories keep the books consistent, and metrics, a dashboard and alert rules watch it all. A recorded walkthrough is next. Progress is tracked on the [milestones](https://github.com/Kare0638/ledgerpay/milestones).
 
@@ -19,12 +19,27 @@ A payment, double-entry ledger and settlement reconciliation service in Java 21 
 - **Item-level reconciliation that only reads**: a run matches each report row to our operation by PSP reference, or by request ID, never by amount and time. Every row, and every operation that succeeded that day or that a row matched, ends up in exactly one category: MATCHED, DUPLICATE_EXTERNAL, MISSING_INTERNAL, MISSING_EXTERNAL, AMOUNT_MISMATCH (with a field-level diff) or STATUS_MISMATCH. Nets that agree cannot hide a break. Our side is read in one `REPEATABLE READ` snapshot, so a posting committed mid-run is not in it (AT-18). Runs are immutable and never touch the ledger. A lost webhook shows up as a STATUS_MISMATCH, is fixed through an inquiry, and the next run matches it while the first run is kept (AT-15, AT-17).
 - **A ledger integrity check independent of the PSP**: with every reconciliation run and on demand, the whole ledger is read in one snapshot and checked against itself. Every succeeded capture and refund has its journal; every journal is balanced and books exactly its operation's postings: the amount to this PSP's receivable, the merchant's share to that merchant, the fee to fee revenue, nothing elsewhere; all postings sum to zero; and each payment's captured and refunded amounts agree with the journals. A deleted journal or a corrupted total fails it even when the day's report matches to the penny (AT-19). A failure logs an error and raises `ledger_invariant_violations` on `/actuator/prometheus`.
 - **Metrics, a dashboard and alerts that watch the money**: Micrometer metrics for outcomes applied, idempotent replays, PSP call latency and failures, the oldest pending operation, operations needing review, quarantined webhooks, the outbox backlog, reserved refunds, reconciliation breaks and ledger violations, behind the ops key. A provisioned Grafana dashboard shows them, and ten Prometheus alert rules each have a `promtool` unit test. On the demo stack, a reconciliation break and a quarantined webhook fire their alerts while the ledger's stays quiet. Logs are JSON with `traceId`, `paymentId`, `pspRequestId` and `idempotencyKey`, and a test checks that no key or secret reaches them ([below](#metrics-dashboard-and-alerts)).
-- **A reconciliation assistant that can only propose** (optional, off without a Gemini key): an LLM gets one break's facts from read-only tools and returns a likely cause, evidence and next steps in a fixed schema, validated before it is stored, every cited ID checked against what the tools returned. Its one action is to propose an inquiry for the break's own pending operation, which a person confirms or rejects. It also gets the closest earlier analyses nobody overruled, found by embedding similarity in Postgres (pgvector), as hints with their IDs left out. The key travels only in a request header and is redacted from every error ([design §16](docs/design.md), [ADR 0009](docs/adr/0009-the-assistant-proposes-a-person-decides.md), [SECURITY.md](SECURITY.md)).
+- **An LLM agent with RAG that can only propose** (optional, off without a Gemini key): a Gemini function-calling agent analyses one reconciliation break from read-only tools, grounded in what they return, with earlier analyses nobody overruled retrieved from pgvector as hints. Its one action, an inquiry, waits for a person ([below](#ai-engineering-a-tool-calling-agent-with-rag), [ADR 0009](docs/adr/0009-the-assistant-proposes-a-person-decides.md)).
 - **A mock PSP with fault injection**: decline, timeout after commit, dropped, duplicated, out-of-order and delayed webhooks, used by acceptance tests that run payment-service against the real mock-psp process and PostgreSQL.
 - **CI quality gate**: every push runs the unit, Testcontainers and acceptance tests, and fails below 80 % line coverage in any module ([below](#running-the-tests)).
 - **Performance analysis**: a JMH benchmark of PSP calls on virtual threads against platform thread pools, and JFR recordings under k6 load ([below](#performance)).
 
 Acceptance tests from the [design's list](docs/design.md): all 19 pass, AT-01 to AT-19.
+
+## AI engineering: a tool-calling agent with RAG
+
+A reconciliation break (a payment the books and the PSP disagree on) needs an engineer to read the report lines, the operation's timeline, its webhooks and journals before deciding what to do. The assistant drafts that analysis. It is built for a domain where a wrong answer moves money, so the model reads and proposes, and code and people decide. Design: [§16](docs/design.md), [ADR 0009](docs/adr/0009-the-assistant-proposes-a-person-decides.md); code: [`payment-service/…/assistant/`](payment-service/src/main/java/com/ledgerpay/payment/assistant/).
+
+- **Agent loop on Gemini function calling**, over plain HTTP with no SDK or framework. Three read-only tools (`get_break`, `get_operation_timeline`, `find_operations`), one action (`propose_inquiry`) and a terminal `submit_analysis`, with function calling forced (`mode: ANY`) and at most 8 turns. The facts every analysis needs come with the question, so an analysis can finish in one model call; the tools are there for anything further. Thinking models' parts, signatures included, are carried through the history.
+- **Structured output, validated and grounded**: `submit_analysis`'s parameters are the output schema (likely cause from a fixed set, confidence, explanation, evidence, next steps). Code checks it before storing: enums, lengths, and every payment, operation or PSP ID it cites must appear in what the tools returned, so an invented ID is refused. A refused submission goes back to the model with the reasons, once; a second refusal is stored as `INVALID_OUTPUT`.
+- **Human in the loop**: the one action is checked in code (only this break's own operation, only while PENDING, at most once, its reason grounded like the analysis) and only recorded as a proposal. A person confirms or rejects it, and only a confirmation schedules the inquiry. The agent can never touch the ledger.
+- **RAG over past analyses (pgvector)**: each break is turned into a signature of what kind of break it is, without IDs, times, amounts or free text, and embedded with `gemini-embedding-001` (768 dimensions). A new analysis retrieves up to three precedents by cosine distance in Postgres, same category first. Retrieval is filtered by human feedback: a break's latest completed analysis counts only if its proposal was not rejected or left undecided. It is de-duplicated per break, so the same break in another run never comes back as its own precedent. Precedents are hints, not facts: an ID only they hold fails the grounding check, and without an embedding the analysis goes ahead with none.
+- **Prompt-injection and data-leak defences**: text from outside (PSP errors, webhook notes) is trimmed, and PSP errors have key-like strings redacted. The retrieval signature keeps only enum-like values, and a precedent is shown only as its signature, likely cause, confidence and whether a person confirmed it, never the model's own free text about another break. This keeps text planted in one break from riding retrieval into the question of every similar one.
+- **Auditable**: every analysis is stored append-only with the model, each tool call and whether it was accepted, turns, tokens and the precedents it was given. A proposal is decided once, with who decided and what the inquiry returned.
+- **Operated like a production dependency**: the API key travels only in a header, is redacted from every error, and reaches the container as a Compose secret; four layers of secret scanning ([SECURITY.md](SECURITY.md)). 429/500/503 are retried with backoff, a daily-quota 429 fails at once, and an unreachable model is a clean 503.
+- **Tested without the model**: CI runs the agent against a scripted Gemini stub (tool calls, thought signatures, refusals, rate limits) and a deterministic bag-of-words embedding, so retrieval ranking, the grounding checks and the guardrails are tested end to end against a real Postgres with pgvector.
+
+Next: an evaluation on the demo's breaks, with and without retrieval, published with its failures (#26).
 
 ## Planned
 
@@ -55,7 +70,7 @@ See [docs/design.md](docs/design.md) for the full design: state machine, posting
 
 ## Tech stack
 
-Java 21 · Spring Boot 3 · PostgreSQL 16 · Flyway · Apache Kafka · Micrometer · Prometheus · Grafana · Testcontainers · jqwik · JMH · JFR · k6 · Docker Compose
+Java 21 · Spring Boot 3 · PostgreSQL 16 with pgvector · Gemini (function calling, embeddings) · Flyway · Apache Kafka · Micrometer · Prometheus · Grafana · Testcontainers · jqwik · JMH · JFR · k6 · Docker Compose
 
 Planned: Terraform · AWS (ECS Fargate, RDS)
 
@@ -161,6 +176,31 @@ curl -s -X POST localhost:8080/ops/ledger-integrity-checks -H 'Authorization: Be
 curl -s localhost:8080/actuator/prometheus -H 'Authorization: Bearer dev-only-ops-key' | grep ledger_invariant_violations
 ```
 
+### The reconciliation assistant
+
+Optional, and off without a Gemini key. Put the key in a file outside the repository as [SECURITY.md](SECURITY.md#secrets) shows, then start the stack through `scripts/with-gemini.sh`, which sets the key for that one command; `scripts/lib.sh` then adds [`infra/docker-compose.assistant.yml`](infra/docker-compose.assistant.yml), which hands it to payment-service as a Compose secret:
+
+```bash
+scripts/with-gemini.sh demo/run.sh       # or scripts/demo.sh
+```
+
+With a run that has a break, such as one of the reconciliation demo's (`RUN`, and `ITEM` the break's `itemNo`):
+
+```bash
+curl -s -X POST localhost:8080/ops/recon-runs/$RUN/items/$ITEM/analysis \
+  -H 'Authorization: Bearer dev-only-ops-key'
+# 201 {"analysisId":"…","status":"COMPLETED","analysis":{"likelyCause":"OUTCOME_NOT_RECEIVED",
+#      "confidence":"HIGH","explanation":"…","evidence":[…],"nextSteps":[…]},
+#      "proposal":{"proposalId":"…","pspOperationId":"…","reason":"…","status":"PROPOSED"},
+#      "toolCalls":[…],"precedentIds":[…],"turns":1,…}
+curl -s -X POST localhost:8080/ops/assistant/proposals/$PROPOSAL/confirm \
+  -H 'Authorization: Bearer dev-only-ops-key' -H 'Content-Type: application/json' \
+  -d '{"decidedBy":"ops-ana"}'
+# the proposal is CONFIRMED with outcome SCHEDULED (or ALREADY_FINAL); .../reject records REJECTED, nothing more
+```
+
+An analysis is stored whatever its outcome (`COMPLETED`, `INVALID_OUTPUT` when the model's submission is refused twice, `FAILED`) and read again at `GET /ops/assistant/analyses/{id}`. Without a key, or with Gemini unreachable, it is 503 `ASSISTANT_UNAVAILABLE`. The models are `gemini-3.5-flash` (`GEMINI_MODEL`) and `gemini-embedding-001`; `ledgerpay.assistant.max-precedents=0` turns precedents off. On the free tier, which allows 20 requests a day per model, an analysis usually takes one call to each. Guardrails and details: [ADR 0009](docs/adr/0009-the-assistant-proposes-a-person-decides.md), [design §16](docs/design.md).
+
 ### Triggering faults
 
 mock-psp runs with the `dev` profile in Compose, which enables `/_admin/faults`. A rule applies to the merchant's next operations of one type:
@@ -191,7 +231,7 @@ Operation types are `AUTHORIZE`, `CAPTURE`, `VOID` and `REFUND`. Each fault also
 | mock-psp | 8081 | http://localhost:8081/actuator/health |
 | notification-service | 8082 | http://localhost:8082/actuator/health; register a merchant endpoint with `PUT /ops/merchants/{id}/webhook-endpoint` and the local ops key `dev-only-ops-key` |
 | merchant-webhook-sink | — | Stands in for the merchant: `docker compose -f infra/docker-compose.yml logs merchant-webhook-sink` shows each signed delivery |
-| PostgreSQL 16 | 5432 | databases `ledgerpay`, `mockpsp` and `notification`, user and password `ledgerpay` |
+| PostgreSQL 16 (pgvector) | 5432 | databases `ledgerpay`, `mockpsp` and `notification`, user and password `ledgerpay` |
 | Kafka (KRaft) | 9092 | `payments.events` (outbox relay → notification-service), `payments.events.dlq` |
 | Prometheus | 9090 | Scrapes both services every 5 s with the ops key; evaluates `infra/prometheus/alerts.yml` |
 | Grafana | 3000 | The provisioned LedgerPay dashboard; anonymous viewing, `admin` / `admin` to edit |
