@@ -5,6 +5,7 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.ledgerpay.payment.PostgresTestcontainersConfiguration;
+import com.ledgerpay.payment.TestDays;
 import com.ledgerpay.payment.api.ApiKeys;
 import com.ledgerpay.payment.ledger.integrity.LedgerIntegrity;
 import com.ledgerpay.payment.psp.PspOperationWorker;
@@ -26,7 +27,6 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.ScheduledExecutorService;
-import java.util.concurrent.ThreadLocalRandom;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
@@ -296,7 +296,7 @@ class MetricsIntegrationTest {
   @Test
   void openBreaksOfOneDayStayVisibleWhateverRunsAfter() {
     String psp = "psp-" + UUID.randomUUID().toString().substring(0, 8);
-    LocalDate day = LocalDate.of(2001, 1, 1).plusDays(ThreadLocalRandom.current().nextInt(30_000));
+    LocalDate day = TestDays.next();
     double before = statusMismatches();
 
     completedRun(psp, day, 1, Map.of("MATCHED", 3, "STATUS_MISMATCH", 2));
