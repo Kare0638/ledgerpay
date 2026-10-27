@@ -44,7 +44,10 @@ The rules for any service that takes one (the first is the assistant, #26):
 
 - Configuration reads it as a placeholder with an empty default, for example `${GEMINI_API_KEY:}`.
   Without one the feature that needs it is off, and everything else starts.
-- Compose passes it through from your shell: `GEMINI_API_KEY: ${GEMINI_API_KEY:-}`.
+- Compose takes it from your shell as a secret, a file under `/run/secrets` that the service reads
+  (`GEMINI_API_KEY_FILE`), not as an environment variable, which `docker inspect` and
+  `docker compose config` would print. `infra/docker-compose.assistant.yml` does this, and
+  `scripts/lib.sh` adds it only when `GEMINI_API_KEY` is set.
 - Tests and CI never use a real key: they run against stubs.
 
 **Kept out of requests and logs.** A key goes in a request header (`x-goog-api-key` for Gemini), never

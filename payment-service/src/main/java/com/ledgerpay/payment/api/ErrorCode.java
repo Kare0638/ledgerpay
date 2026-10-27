@@ -19,7 +19,9 @@ public enum ErrorCode {
   UNSUPPORTED_MEDIA_TYPE(HttpStatus.UNSUPPORTED_MEDIA_TYPE),
   IDEMPOTENCY_KEY_REUSED(HttpStatus.UNPROCESSABLE_ENTITY),
   INTERNAL_ERROR(HttpStatus.INTERNAL_SERVER_ERROR),
-  TEMPORARILY_UNAVAILABLE(HttpStatus.SERVICE_UNAVAILABLE);
+  TEMPORARILY_UNAVAILABLE(HttpStatus.SERVICE_UNAVAILABLE),
+  /** The reconciliation assistant has no key configured, or its model could not be reached. */
+  ASSISTANT_UNAVAILABLE(HttpStatus.SERVICE_UNAVAILABLE);
 
   private final HttpStatus status;
 

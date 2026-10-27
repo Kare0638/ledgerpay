@@ -19,6 +19,7 @@ A payment, double-entry ledger and settlement reconciliation service in Java 21 
 - **Item-level reconciliation that only reads**: a run matches each report row to our operation by PSP reference, or by request ID, never by amount and time. Every row, and every operation that succeeded that day or that a row matched, ends up in exactly one category: MATCHED, DUPLICATE_EXTERNAL, MISSING_INTERNAL, MISSING_EXTERNAL, AMOUNT_MISMATCH (with a field-level diff) or STATUS_MISMATCH. Nets that agree cannot hide a break. Our side is read in one `REPEATABLE READ` snapshot, so a posting committed mid-run is not in it (AT-18). Runs are immutable and never touch the ledger. A lost webhook shows up as a STATUS_MISMATCH, is fixed through an inquiry, and the next run matches it while the first run is kept (AT-15, AT-17).
 - **A ledger integrity check independent of the PSP**: with every reconciliation run and on demand, the whole ledger is read in one snapshot and checked against itself. Every succeeded capture and refund has its journal; every journal is balanced and books exactly its operation's postings: the amount to this PSP's receivable, the merchant's share to that merchant, the fee to fee revenue, nothing elsewhere; all postings sum to zero; and each payment's captured and refunded amounts agree with the journals. A deleted journal or a corrupted total fails it even when the day's report matches to the penny (AT-19). A failure logs an error and raises `ledger_invariant_violations` on `/actuator/prometheus`.
 - **Metrics, a dashboard and alerts that watch the money**: Micrometer metrics for outcomes applied, idempotent replays, PSP call latency and failures, the oldest pending operation, operations needing review, quarantined webhooks, the outbox backlog, reserved refunds, reconciliation breaks and ledger violations, behind the ops key. A provisioned Grafana dashboard shows them, and ten Prometheus alert rules each have a `promtool` unit test. On the demo stack, a reconciliation break and a quarantined webhook fire their alerts while the ledger's stays quiet. Logs are JSON with `traceId`, `paymentId`, `pspRequestId` and `idempotencyKey`, and a test checks that no key or secret reaches them ([below](#metrics-dashboard-and-alerts)).
+- **A reconciliation assistant that can only propose** (optional, off without a Gemini key): an LLM gets one break's facts from read-only tools and returns a likely cause, evidence and next steps in a fixed schema, validated before it is stored, every cited ID checked against what the tools returned. Its one action is to propose an inquiry for the break's own pending operation, which a person confirms or rejects. The key travels only in a request header and is redacted from every error ([design §16](docs/design.md), [ADR 0009](docs/adr/0009-the-assistant-proposes-a-person-decides.md), [SECURITY.md](SECURITY.md)).
 - **A mock PSP with fault injection**: decline, timeout after commit, dropped, duplicated, out-of-order and delayed webhooks, used by acceptance tests that run payment-service against the real mock-psp process and PostgreSQL.
 - **CI quality gate**: every push runs the unit, Testcontainers and acceptance tests, and fails below 80 % line coverage in any module ([below](#running-the-tests)).
 - **Performance analysis**: a JMH benchmark of PSP calls on virtual threads against platform thread pools, and JFR recordings under k6 load ([below](#performance)).
@@ -31,7 +32,7 @@ Acceptance tests from the [design's list](docs/design.md): all 19 pass, AT-01 to
 |---|---|---|
 | M3: reconciliation and observability | A recorded walkthrough of the reconciliation demo | #21 |
 | M4: performance and cloud | Published k6 results, Terraform for ECS Fargate and RDS | #23, #24 |
-| Optional | An LLM assistant that drafts analyses of reconciliation breaks; SQS/SNS adapter | #26, #25 |
+| Optional | The assistant's evaluation on the demo's breaks, published with its failures; SQS/SNS adapter | #26, #25 |
 
 ## Architecture
 
@@ -222,6 +223,7 @@ Requires JDK 21 and a running Docker daemon (Testcontainers starts PostgreSQL an
 | [0006](docs/adr/0006-transactional-outbox-at-least-once.md) | Transactional outbox; at-least-once delivery with idempotent consumers |
 | [0007](docs/adr/0007-reconciliation-never-mutates-the-ledger-utc-business-days.md) | Reconciliation never mutates the ledger; UTC business days; reports kept as versions |
 | [0008](docs/adr/0008-virtual-threads-for-psp-calls.md) | Virtual threads for PSP calls |
+| [0009](docs/adr/0009-the-assistant-proposes-a-person-decides.md) | The reconciliation assistant reads facts and proposes; a person decides |
 
 ## Performance
 

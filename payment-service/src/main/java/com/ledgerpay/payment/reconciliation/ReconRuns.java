@@ -154,6 +154,16 @@ public class ReconRuns {
         .list();
   }
 
+  public Optional<ReconItem> item(UUID runId, int itemNo) {
+    return jdbc.sql(
+            """
+            SELECT item_no, category, psp_reference, external_line_nos, internal, diff
+              FROM recon_items WHERE run_id = ? AND item_no = ?""")
+        .params(runId, itemNo)
+        .query(this::mapItem)
+        .optional();
+  }
+
   public long countItems(UUID runId, ReconCategory category) {
     return jdbc.sql(
             """
