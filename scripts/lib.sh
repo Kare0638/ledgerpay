@@ -15,6 +15,11 @@ PSP=http://localhost:8081
 NOTIFY=http://localhost:8082
 OPS_KEY=dev-only-ops-key   # matches both OPS_API_KEY_HASH in infra/docker-compose.yml
 PAUSE=${PAUSE:-false}      # true: wait for Enter before each step, for a recorded walkthrough
+# With a Gemini key in the environment (scripts/with-gemini.sh), the stack also runs the
+# reconciliation assistant, the key passed as a Compose secret (infra/docker-compose.assistant.yml).
+if [[ -n ${GEMINI_API_KEY:-} ]]; then
+  COMPOSE+=(-f infra/docker-compose.assistant.yml)
+fi
 
 step() {
   if [[ $PAUSE == true ]]; then

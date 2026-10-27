@@ -71,6 +71,12 @@ ledgerpay:
     # A run still RUNNING this long is taken to have died with its process and marked FAILED.
     abandoned-after: 10m
     sweep-interval: 1m
+  assistant:
+    # The reconciliation assistant (#26) is off without a key. The key comes from the environment
+    # or a file such as a Compose secret, never from this file (SECURITY.md).
+    api-key: ${GEMINI_API_KEY:}
+    api-key-file: ${GEMINI_API_KEY_FILE:}
+    model: ${GEMINI_MODEL:gemini-3.5-flash}
   ops:
     # Hex SHA-256 of the operations key for /ops/**; unset turns those endpoints off.
     api-key-hash: ${OPS_API_KEY_HASH:}

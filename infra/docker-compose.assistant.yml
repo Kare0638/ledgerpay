@@ -1,0 +1,20 @@
+# The reconciliation assistant (#26), on top of docker-compose.yml, only with a Gemini key:
+#
+#   scripts/with-gemini.sh docker compose -f infra/docker-compose.yml \
+#     -f infra/docker-compose.assistant.yml up -d
+#
+# (scripts/lib.sh adds this file by itself when GEMINI_API_KEY is set.) The key reaches the
+# container as a Compose secret, a file under /run/secrets, not as an environment variable, which
+# docker inspect and docker compose config would print. Without the key, leave this file out: the
+# assistant stays off and Compose would refuse the missing secret.
+services:
+  payment-service:
+    environment:
+      GEMINI_API_KEY_FILE: /run/secrets/gemini_api_key
+      GEMINI_MODEL: ${GEMINI_MODEL:-gemini-3.5-flash}
+    secrets:
+      - gemini_api_key
+
+secrets:
+  gemini_api_key:
+    environment: GEMINI_API_KEY

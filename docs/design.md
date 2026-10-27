@@ -420,6 +420,33 @@ CREATE TABLE ledger_integrity_checks (
     violations       JSONB,                  -- [{check, subject, detail}], the first 1,000
     checked_at       TIMESTAMPTZ NOT NULL DEFAULT now()
 );
+
+-- V12__assistant.sql (#26). Analyses are append-only; a proposal is decided once.
+CREATE TABLE assistant_analyses (
+    id          UUID PRIMARY KEY,
+    run_id      UUID        NOT NULL REFERENCES recon_runs(id),
+    item_no     INT         NOT NULL,           -- with run_id, references recon_items
+    model       TEXT        NOT NULL,
+    status      TEXT        NOT NULL,           -- COMPLETED / INVALID_OUTPUT / FAILED
+    analysis    JSONB,                          -- the validated output; null unless COMPLETED
+    error       TEXT,                           -- why it is not COMPLETED
+    tool_calls  JSONB       NOT NULL,           -- [{tool, args, ok}] in order, for audit
+    turns       INT         NOT NULL,
+    tokens      INT,
+    created_at  TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE TABLE inquiry_proposals (
+    id                UUID PRIMARY KEY,
+    analysis_id       UUID NOT NULL UNIQUE REFERENCES assistant_analyses(id),
+    psp_operation_id  UUID NOT NULL REFERENCES psp_operations(id),
+    reason            TEXT NOT NULL,
+    status            TEXT NOT NULL,            -- PROPOSED / CONFIRMED / REJECTED
+    decided_by        TEXT,
+    decided_at        TIMESTAMPTZ,
+    outcome           TEXT,                     -- SCHEDULED / ALREADY_FINAL / OPERATION_NOT_FOUND
+    created_at        TIMESTAMPTZ NOT NULL DEFAULT now()
+);
 ```
 
 notification-service database (`notification`):
@@ -483,6 +510,9 @@ Every merchant write requires an `Idempotency-Key` header. A settlement report u
 | GET | `/ops/recon-runs/{id}`, `/ops/recon-runs?reportId=` | A run with its summary; every run of a report, oldest first | 200 | 404 |
 | GET | `/ops/recon-runs/{id}/items?category=&offset=&limit=` | Item-level breaks with their report lines, our operation and the diff; up to 1,000 a page | 200 | 400 / 404 |
 | POST | `/ops/psp-operations/{id}/inquiry` | Trigger a PSP status inquiry | 202 | 404 |
+| POST | `/ops/recon-runs/{id}/items/{itemNo}/analysis` | Ask the assistant to analyse one break (section 16) | 201, COMPLETED / INVALID_OUTPUT / FAILED | 404 / 409 for a matched item / 503 `ASSISTANT_UNAVAILABLE` |
+| GET | `/ops/assistant/analyses/{id}` | An analysis with its tool calls and proposal | 200 | 404 |
+| POST | `/ops/assistant/proposals/{id}/confirm`, `…/reject` | A person decides a proposed inquiry: `{"decidedBy": …}` | 200 | 400 / 404 / 409 once decided, or while the worker holds the operation |
 | POST | `/ops/ledger-integrity-checks` | Check the ledger against itself now (section 11.2) | 201, PASSED or FAILED | |
 | GET | `/ops/ledger-integrity-checks/{id}`, `/ops/ledger-integrity-checks?limit=` | One check with its violations; the latest checks | 200 | 400 / 404 |
 | GET | `/actuator/health`, `/actuator/prometheus` | Health (open) and metrics (ops key) | 200 | 401 for metrics without the ops key |
@@ -918,9 +948,19 @@ Findings go into the README's Performance section: GC pause p50 / p99 / max and 
 
 ## 16. Optional: reconciliation assistant
 
-When reconciliation reports breaks, structured facts (category, field diff, operation timeline, latest inquiry result) are given to an LLM, which drafts likely causes and next steps.
+An operator asks for an analysis of one break (`POST /ops/recon-runs/{id}/items/{itemNo}/analysis`). A model, Gemini through its REST API, gets the break's facts and returns a likely cause, its evidence and next steps. It is off unless a key is configured (`GEMINI_API_KEY`, or `GEMINI_API_KEY_FILE` for a Compose secret); everything else runs without it. [ADR 0009](adr/0009-the-assistant-proposes-a-person-decides.md) records the guardrails.
 
-Guardrails: the LLM can only *propose* an inquiry, which a human must confirm; it can never modify the ledger. Inputs contain internal IDs and amounts only. Output is a fixed JSON schema, validated before display. A small evaluation set — the four report variants plus the lost-webhook case — checks whether the diagnosis is correct.
+**Facts, not access.** The question comes with what the read-only tools return for the break: the item, its report lines and diff (`get_break`), and its operation's timeline (`get_operation_timeline`: attempts, last error, journals, webhooks received). The model may call `get_operation_timeline` or `find_operations` (by PSP reference) for anything more. The tools read through the same queries as the reconciliation API; none writes, and none reaches merchants, keys or anything outside the break. Preloading the facts keeps an analysis to one or two model calls, which matters on Gemini's free tier (20 requests a day per model).
+
+**One action, proposed.** `propose_inquiry` is the model's only action, and it only records a proposal: at most one per analysis, and only for this break's own operation while it is PENDING. Anything else is refused and the model told why. A person confirms it (`…/proposals/{id}/confirm`), which goes through the same path as `POST /ops/psp-operations/{id}/inquiry` (section 7), or rejects it. Proposing changes nothing; the ledger is reached only as it always is, through an inquiry's result (section 9.3).
+
+**A fixed output, validated.** The model finishes by calling `submit_analysis`, whose parameters are the schema: `likelyCause` (one of `OUTCOME_NOT_RECEIVED`, `CONFLICTING_OUTCOME`, `DUPLICATE_IN_REPORT`, `MISSING_FROM_REPORT`, `FIELD_MISMATCH`, `UNKNOWN_TRANSACTION`, `INSUFFICIENT_EVIDENCE`), `confidence`, `explanation`, 1–8 `evidence` lines, up to 5 `nextSteps`. It is checked before it is stored: the enums, the lengths, and every UUID or PSP reference cited must be one the tools returned. A refused submission goes back once with the reason; a second is stored as `INVALID_OUTPUT`, with nothing to show. Eight model calls without a valid analysis is `FAILED`.
+
+**Kept.** Every analysis is stored, append-only, with the model, its tool calls in order, turns and tokens (`assistant_analyses`, section 6); a proposal is decided once (`inquiry_proposals`).
+
+**Calls to Gemini.** The key goes in the `x-goog-api-key` header only, and is redacted from every error (SECURITY.md). 429, 500 and 503 are retried with backoff, but a 429 for a daily quota fails at once, and a wait Google asks for is honoured only up to 60 seconds. A model that cannot be reached is 503 `ASSISTANT_UNAVAILABLE`. Tests run against a stub; only synthetic demo data goes to the free tier, which Google may use to improve its products.
+
+**Evaluation.** The four report variants and the lost webhook of the demo (section 12) are the evaluation set, each with its expected cause and proposal; the results, failures included, are published in the README.
 
 ---
 
@@ -979,6 +1019,7 @@ ledgerpay/
 | [0006](adr/0006-transactional-outbox-at-least-once.md) | Transactional outbox; at-least-once delivery with idempotent consumers |
 | [0007](adr/0007-reconciliation-never-mutates-the-ledger-utc-business-days.md) | Reconciliation never mutates the ledger; UTC business days; reports kept as versions |
 | [0008](adr/0008-virtual-threads-for-psp-calls.md) | Virtual threads for PSP calls |
+| [0009](adr/0009-the-assistant-proposes-a-person-decides.md) | The reconciliation assistant reads facts and proposes; a person decides |
 
 All are accepted. Each ADR records context and constraints, the decision, rejected alternatives, trade-offs and the tests that cover it.
 
