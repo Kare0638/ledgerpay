@@ -7,6 +7,7 @@ import static org.awaitility.Awaitility.await;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.ledgerpay.payment.PostgresTestcontainersConfiguration;
+import com.ledgerpay.payment.TestDays;
 import com.ledgerpay.payment.ledger.integrity.LedgerIntegrity;
 import com.ledgerpay.payment.metrics.PaymentMetrics;
 import com.ledgerpay.payment.settlement.SettlementImporter;
@@ -30,7 +31,6 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.ScheduledExecutorService;
-import java.util.concurrent.ThreadLocalRandom;
 import java.util.concurrent.TimeUnit;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
@@ -144,7 +144,7 @@ class ReconRunIntegrationTest {
     probe.reset();
     merchant = "m_" + UUID.randomUUID();
     psp = "test-" + UUID.randomUUID().toString().substring(0, 13);
-    day = LocalDate.of(2001, 1, 1).plusDays(ThreadLocalRandom.current().nextInt(30_000));
+    day = TestDays.next();
     jdbc.sql("INSERT INTO merchants (id, api_key_hash) VALUES (?, ?)")
         .params(merchant, "hash_" + merchant)
         .update();
