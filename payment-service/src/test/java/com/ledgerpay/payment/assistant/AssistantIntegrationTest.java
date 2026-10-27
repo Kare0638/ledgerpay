@@ -17,6 +17,7 @@ import java.time.Duration;
 import java.time.LocalDate;
 import java.time.ZoneOffset;
 import java.util.UUID;
+import java.util.stream.Stream;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
@@ -74,6 +75,7 @@ class AssistantIntegrationTest {
   final HttpClient http = HttpClient.newHttpClient();
   String merchant;
   LocalDate day;
+  UUID reportId;
   UUID runId;
 
   /** P1 captured and in the report; P2 captured at the PSP, PENDING here (a lost webhook). */
@@ -96,7 +98,7 @@ class AssistantIntegrationTest {
     p1 = operation(10_000, "SUCCEEDED");
     p2 = operation(20_000, "PENDING");
     String csv = HEADER + row(p1) + row(p2);
-    UUID report =
+    reportId =
         importer
             .importReport(
                 "psp-" + UUID.randomUUID().toString().substring(0, 8),
@@ -104,9 +106,14 @@ class AssistantIntegrationTest {
                 csv.getBytes(StandardCharsets.UTF_8))
             .report()
             .reportId();
+    runTheReport();
+  }
+
+  /** Reconciles the day's report, again if it was before: a new run with the same breaks. */
+  void runTheReport() throws Exception {
     runId =
         UUID.fromString(
-            send("POST", "/ops/recon-runs", "{\"reportId\": \"" + report + "\"}")
+            send("POST", "/ops/recon-runs", "{\"reportId\": \"" + reportId + "\"}")
                 .body()
                 .path("runId")
                 .asText());
@@ -213,6 +220,30 @@ class AssistantIntegrationTest {
         "{\"pspOperationId\": \"" + p2.id() + "\", \"reason\": \"The PSP says SUCCEEDED\"}");
   }
 
+  /** The question of the generateContent call {@code index}. */
+  String question(int index) throws Exception {
+    return json.readTree(gemini.calls().get(index).body())
+        .path("contents")
+        .path(0)
+        .path("parts")
+        .path(0)
+        .path("text")
+        .asText();
+  }
+
+  /** Analyses this day's lost webhook and a person confirms the inquiry; the analysis' ID. */
+  String analyseAndConfirm() throws Exception {
+    scriptTheLostWebhookAnalysis();
+    JsonNode stored = analyse().body();
+    send(
+        "POST",
+        "/ops/assistant/proposals/"
+            + stored.path("proposal").path("proposalId").asText()
+            + "/confirm",
+        "{\"decidedBy\": \"ops-ana\"}");
+    return stored.path("analysisId").asText();
+  }
+
   @Test
   void aLostWebhookIsAnalysedFromTheToolsFactsAndTheKeyOnlyEverTravelsInAHeader(
       CapturedOutput output) throws Exception {
@@ -237,11 +268,15 @@ class AssistantIntegrationTest {
 
     var calls = gemini.calls();
     assertThat(calls).hasSize(1);
-    for (var call : calls) {
+    assertThat(calls.getFirst().uri()).isEqualTo("/v1beta/models/gemini-3.5-flash:generateContent");
+    // The break was embedded first, to find precedents (#64), with the key in the same place.
+    var embedCalls = gemini.embedCalls();
+    assertThat(embedCalls).hasSize(1);
+    assertThat(embedCalls.getFirst().uri())
+        .isEqualTo("/v1beta/models/gemini-embedding-001:embedContent");
+    for (var call : Stream.concat(calls.stream(), embedCalls.stream()).toList()) {
       assertThat(call.header("x-goog-api-key")).isEqualTo(KEY);
-      assertThat(call.uri())
-          .isEqualTo("/v1beta/models/gemini-3.5-flash:generateContent")
-          .doesNotContain(KEY);
+      assertThat(call.uri()).doesNotContain(KEY);
       assertThat(call.body()).doesNotContain(KEY);
     }
     // The break's facts and its operation's timeline came with the question.
@@ -454,6 +489,132 @@ class AssistantIntegrationTest {
             .path("error")
             .asText();
     assertThat(refusal).startsWith("the reason cites IDs the tools never returned: psp_invented_9");
+  }
+
+  /** #64: a confirmed analysis of another day's lost webhook comes with the question, IDs out. */
+  @Test
+  void aConfirmedAnalysisOfAnotherBreakIsGivenAsAPrecedentWithoutItsIds() throws Exception {
+    Op earlier = p2;
+    String precedent = analyseAndConfirm();
+    aDayWithALostWebhook();
+    scriptTheLostWebhookAnalysis();
+
+    JsonNode stored = analyse().body();
+
+    assertThat(stored.path("status").asText()).isEqualTo("COMPLETED");
+    // Breaks of the same kind tie on distance; the newest comes first.
+    assertThat(stored.path("precedentIds").get(0).asText()).isEqualTo(precedent);
+    String question = question(0);
+    // Its kind and verdict, not the model's free text about the other break.
+    assertThat(question.substring(question.indexOf("Precedents:")))
+        .contains(
+            "category: STATUS_MISMATCH",
+            "\"likelyCause\" : \"OUTCOME_NOT_RECEIVED\"",
+            "\"inquiryConfirmedByAPerson\" : true")
+        .doesNotContain(
+            earlier.id().toString(),
+            earlier.reference(),
+            earlier.requestId(),
+            "no webhook was received",
+            "Confirm the proposed inquiry");
+    assertThat(
+            send("GET", "/ops/assistant/analyses/" + stored.path("analysisId").asText(), null)
+                .body()
+                .path("precedentIds"))
+        .isEqualTo(stored.path("precedentIds"));
+  }
+
+  /**
+   * Only an analysis nobody overruled is a precedent: not one whose proposal is still open or was
+   * rejected, and not one a newer analysis of the same break replaced.
+   */
+  @Test
+  void anOpenOrRejectedProposalOrAReplacedAnalysisIsNoPrecedent() throws Exception {
+    scriptTheLostWebhookAnalysis();
+    String open = analyse().body().path("analysisId").asText();
+
+    aDayWithALostWebhook();
+    scriptTheLostWebhookAnalysis();
+    JsonNode rejected = analyse().body();
+    send(
+        "POST",
+        "/ops/assistant/proposals/"
+            + rejected.path("proposal").path("proposalId").asText()
+            + "/reject",
+        "{\"decidedBy\": \"ops-ana\"}");
+
+    aDayWithALostWebhook();
+    String replaced = analyseAndConfirm();
+    gemini.thenCall(
+        "submit_analysis", submit("OUTCOME_NOT_RECEIVED", "PENDING here, SUCCEEDED there."));
+    String replacing = analyse().body().path("analysisId").asText();
+
+    aDayWithALostWebhook();
+    scriptTheLostWebhookAnalysis();
+    JsonNode stored = analyse().body();
+
+    assertThat(stored.path("precedentIds").get(0).asText()).isEqualTo(replacing);
+    assertThat(stored.path("precedentIds").toString())
+        .doesNotContain(open, rejected.path("analysisId").asText(), replaced);
+  }
+
+  /**
+   * A break analysed in an earlier run of the same report is the same break, not a precedent of it:
+   * its own earlier answer, shown as another break's, would only agree with itself.
+   */
+  @Test
+  void theSameBreakInAnotherRunIsNoPrecedentOfItself() throws Exception {
+    gemini.thenCall(
+        "submit_analysis", submit("OUTCOME_NOT_RECEIVED", "PENDING here, SUCCEEDED there."));
+    String earlier = analyse().body().path("analysisId").asText();
+
+    runTheReport();
+    scriptTheLostWebhookAnalysis();
+    JsonNode stored = analyse().body();
+
+    assertThat(stored.path("status").asText()).isEqualTo("COMPLETED");
+    assertThat(stored.path("precedentIds").toString()).doesNotContain(earlier);
+  }
+
+  /** A precedent's IDs are not facts of this break: citing one is refused like an invented one. */
+  @Test
+  void anIdFromAPrecedentCitedAsAFactIsRefused() throws Exception {
+    Op earlier = p2;
+    analyseAndConfirm();
+    aDayWithALostWebhook();
+    gemini
+        .thenCall(
+            "submit_analysis",
+            submit("OUTCOME_NOT_RECEIVED", "Like operation " + earlier.id() + " before."))
+        .thenCall(
+            "submit_analysis", submit("OUTCOME_NOT_RECEIVED", "PENDING here, SUCCEEDED there."));
+
+    JsonNode stored = analyse().body();
+
+    assertThat(stored.path("status").asText()).isEqualTo("COMPLETED");
+    assertThat(stored.path("precedentIds")).isNotEmpty();
+    assertThat(stored.path("toolCalls").findValuesAsText("ok")).containsExactly("false", "true");
+  }
+
+  /** Precedents are hints: without an embedding the analysis goes ahead with none. */
+  @Test
+  void withoutAnEmbeddingTheAnalysisGoesAheadWithoutPrecedents() throws Exception {
+    analyseAndConfirm();
+    aDayWithALostWebhook();
+    gemini.failEmbeddings();
+    scriptTheLostWebhookAnalysis();
+
+    JsonNode stored = analyse().body();
+
+    assertThat(stored.path("status").asText()).isEqualTo("COMPLETED");
+    assertThat(stored.path("precedentIds")).isEmpty();
+    assertThat(question(0)).doesNotContain("Precedents:");
+    assertThat(
+            jdbc.sql("SELECT break_embedding IS NULL FROM assistant_analyses WHERE id = ?")
+                .param(UUID.fromString(stored.path("analysisId").asText()))
+                .query(Boolean.class)
+                .single())
+        .isTrue();
   }
 
   @Test

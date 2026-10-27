@@ -4,7 +4,11 @@ import java.time.Instant;
 import java.util.List;
 import java.util.UUID;
 
-/** An analysis as stored and shown, with its proposal if it made one. */
+/**
+ * An analysis as stored and shown, with its proposal if it made one.
+ *
+ * @param precedentIds the earlier analyses it was given as hints (#64), in order
+ */
 public record StoredAnalysis(
     UUID analysisId,
     UUID runId,
@@ -15,6 +19,7 @@ public record StoredAnalysis(
     String error,
     StoredProposal proposal,
     List<AgentResult.ToolCall> toolCalls,
+    List<UUID> precedentIds,
     int turns,
     Integer tokens,
     Instant createdAt) {

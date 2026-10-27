@@ -2,6 +2,7 @@ package com.ledgerpay.payment.assistant;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.ObjectNode;
 import java.io.IOException;
 import java.net.URI;
 import java.net.http.HttpClient;
@@ -14,10 +15,10 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 /**
- * Gemini's generateContent over plain HTTP (no SDK): one model, one call per turn. The key goes in
- * the {@code x-goog-api-key} header only, never in the URL, where it would reach exception messages
- * and access logs; every error this class raises has key-like strings redacted. A refusal for rate
- * or availability (429, 500, 503) is retried with backoff; anything else is an error at once. A 429
+ * Gemini's generateContent and embedContent over plain HTTP (no SDK). The key goes in the {@code
+ * x-goog-api-key} header only, never in the URL, where it would reach exception messages and access
+ * logs; every error this class raises has key-like strings redacted. A refusal for rate or
+ * availability (429, 500, 503) is retried with backoff; anything else is an error at once. A 429
  * says which quota ran out: a daily one fails at once (the free tier allows 20 requests a day per
  * model, and retrying only spends the next day's), and a wait Google asks for is honoured up to
  * {@link #MAX_SUGGESTED_WAIT}, beyond which the call fails rather than hold a request open.
@@ -28,6 +29,9 @@ class GeminiClient {
 
   static final Duration MAX_SUGGESTED_WAIT = Duration.ofSeconds(60);
 
+  /** The size of an embedding, as the column {@code assistant_analyses.break_embedding} has it. */
+  static final int EMBEDDING_DIMENSIONS = 768;
+
   /** The model could not be reached or refused the call; the message is safe to show. */
   static class GeminiException extends RuntimeException {
     GeminiException(String message) {
@@ -37,7 +41,8 @@ class GeminiClient {
 
   private final HttpClient http;
   private final ObjectMapper json;
-  private final URI endpoint;
+  private final URI generate;
+  private final URI embed;
   private final String key;
   private final Duration timeout;
   private final int maxRetries;
@@ -52,19 +57,52 @@ class GeminiClient {
             .executor(Executors.newVirtualThreadPerTaskExecutor())
             .build();
     this.json = json;
-    this.endpoint =
-        URI.create(
-            properties.baseUrl().replaceAll("/+$", "")
-                + "/v1beta/models/"
-                + properties.model()
-                + ":generateContent");
+    String models = properties.baseUrl().replaceAll("/+$", "") + "/v1beta/models/";
+    this.generate = URI.create(models + properties.model() + ":generateContent");
+    this.embed = URI.create(models + properties.embeddingModel() + ":embedContent");
     this.key = key;
     this.timeout = properties.timeout();
     this.maxRetries = properties.maxRetries();
     this.backoff = properties.retryBackoff();
   }
 
+  /** One turn of the conversation: the model's next content. */
   JsonNode generate(JsonNode request) {
+    return post(generate, request);
+  }
+
+  /** The text's embedding, {@link #EMBEDDING_DIMENSIONS} values, for comparing breaks. */
+  float[] embed(String text) {
+    ObjectNode request = json.createObjectNode();
+    request.putObject("content").putArray("parts").addObject().put("text", text);
+    request.put("taskType", "SEMANTIC_SIMILARITY");
+    request.put("outputDimensionality", EMBEDDING_DIMENSIONS);
+    JsonNode values = post(embed, request).path("embedding").path("values");
+    if (!values.isArray() || values.size() != EMBEDDING_DIMENSIONS) {
+      throw new GeminiException(
+          "Gemini answered an embedding of "
+              + values.size()
+              + " values, not "
+              + EMBEDDING_DIMENSIONS);
+    }
+    float[] embedding = new float[EMBEDDING_DIMENSIONS];
+    boolean zero = true;
+    for (int i = 0; i < embedding.length; i++) {
+      JsonNode value = values.get(i);
+      if (!value.isNumber()) {
+        throw new GeminiException("Gemini answered an embedding with a value that is no number");
+      }
+      embedding[i] = (float) value.asDouble();
+      zero &= embedding[i] == 0;
+    }
+    if (zero) {
+      // Its cosine distance to anything is NaN, which sorts unpredictably.
+      throw new GeminiException("Gemini answered an embedding of zeros");
+    }
+    return embedding;
+  }
+
+  private JsonNode post(URI endpoint, JsonNode request) {
     byte[] body;
     try {
       body = json.writeValueAsBytes(request);
@@ -193,6 +231,6 @@ class GeminiClient {
 
   @Override
   public String toString() {
-    return "GeminiClient[" + endpoint + "]";
+    return "GeminiClient[" + generate + ", " + embed + "]";
   }
 }

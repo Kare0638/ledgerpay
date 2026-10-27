@@ -19,6 +19,8 @@ import org.springframework.boot.context.properties.bind.DefaultValue;
  * @param timeout one model call, thinking included
  * @param maxTurns model calls per analysis before it is given up
  * @param maxRetries retries of a call refused for rate or availability (429, 500, 503)
+ * @param embeddingModel the Gemini model that embeds a break, to find precedents (#64)
+ * @param maxPrecedents past analyses given with the question; 0 gives none, for comparing
  */
 @ConfigurationProperties("ledgerpay.assistant")
 public record AssistantProperties(
@@ -29,7 +31,9 @@ public record AssistantProperties(
     @DefaultValue("120s") Duration timeout,
     @DefaultValue("8") int maxTurns,
     @DefaultValue("3") int maxRetries,
-    @DefaultValue("2s") Duration retryBackoff) {
+    @DefaultValue("2s") Duration retryBackoff,
+    @DefaultValue("gemini-embedding-001") String embeddingModel,
+    @DefaultValue("3") int maxPrecedents) {
 
   /** The key, from {@code apiKey} or else {@code apiKeyFile}; empty when there is none. */
   String resolveKey() {
@@ -52,6 +56,10 @@ public record AssistantProperties(
     // A record prints every component: never the key.
     return "AssistantProperties[model="
         + model
+        + ", embeddingModel="
+        + embeddingModel
+        + ", maxPrecedents="
+        + maxPrecedents
         + ", baseUrl="
         + baseUrl
         + ", key="

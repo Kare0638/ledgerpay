@@ -16,6 +16,7 @@ import java.time.Duration;
 import java.time.Instant;
 import org.springframework.test.context.DynamicPropertyRegistry;
 import org.testcontainers.containers.PostgreSQLContainer;
+import org.testcontainers.utility.DockerImageName;
 
 /**
  * The stack the acceptance tests run against (design §12): one PostgreSQL container with a database
@@ -30,7 +31,11 @@ final class LiveStack {
   static final String WEBHOOK_SECRET = "acceptance-webhook-secret";
   static final String OPS_KEY = "acceptance-ops-key";
 
-  static final PostgreSQLContainer<?> POSTGRES = new PostgreSQLContainer<>("postgres:16-alpine");
+  static final PostgreSQLContainer<?> POSTGRES =
+      new PostgreSQLContainer<>(
+          // pgvector: payment-service's migrations create the extension (V13).
+          DockerImageName.parse("pgvector/pgvector:0.8.0-pg16")
+              .asCompatibleSubstituteFor("postgres"));
   static final int PAYMENT_PORT;
   static final int MOCK_PSP_PORT;
   static final MockPspFaults FAULTS;

@@ -1,6 +1,7 @@
 package com.ledgerpay.payment.assistant;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.ObjectNode;
 import com.ledgerpay.payment.api.ApiException;
 import com.ledgerpay.payment.api.ErrorCode;
 import com.ledgerpay.payment.api.ResourceNotFoundException;
@@ -9,6 +10,7 @@ import com.ledgerpay.payment.reconciliation.ReconCategory;
 import com.ledgerpay.payment.reconciliation.ReconItem;
 import com.ledgerpay.payment.reconciliation.ReconRun;
 import com.ledgerpay.payment.reconciliation.ReconRuns;
+import java.util.List;
 import java.util.UUID;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -32,6 +34,8 @@ public class Assistant {
   private final PspOperations operations;
   private final TransactionTemplate transactions;
   private final String model;
+  private final int maxPrecedents;
+  private final GeminiClient gemini;
   private final AssistantAgent agent;
 
   public Assistant(
@@ -47,12 +51,11 @@ public class Assistant {
     this.operations = operations;
     this.transactions = transactions;
     this.model = properties.model();
+    this.maxPrecedents = properties.maxPrecedents();
     String key = properties.resolveKey();
+    this.gemini = key.isEmpty() ? null : new GeminiClient(properties, key, json);
     this.agent =
-        key.isEmpty()
-            ? null
-            : new AssistantAgent(
-                new GeminiClient(properties, key, json), tools, json, properties.maxTurns());
+        gemini == null ? null : new AssistantAgent(gemini, tools, json, properties.maxTurns());
     log.info(
         "Reconciliation assistant {}", agent == null ? "off: no key configured" : "on, " + model);
   }
@@ -77,24 +80,58 @@ public class Assistant {
           ErrorCode.ASSISTANT_UNAVAILABLE,
           "The assistant is off: no Gemini key is configured (SECURITY.md)");
     }
+    ObjectNode given = agent.facts(run, item);
+    String signature = BreakSignature.of(given);
+    float[] embedding = embed(signature, runId, itemNo);
+    List<Precedent> precedents =
+        embedding == null || maxPrecedents == 0
+            ? List.of()
+            : store.precedents(runId, itemNo, item.category().name(), embedding, maxPrecedents);
     AgentResult result;
     try {
-      result = agent.analyse(run, item);
+      result = agent.analyse(run, item, given, precedents);
     } catch (GeminiClient.GeminiException e) {
       log.warn("Assistant could not analyse item {} of run {}: {}", itemNo, runId, e.getMessage());
       throw new ApiException(ErrorCode.ASSISTANT_UNAVAILABLE, e.getMessage());
     }
-    UUID id = store.insert(runId, itemNo, model, result);
+    UUID id =
+        store.insert(
+            runId,
+            itemNo,
+            model,
+            result,
+            signature,
+            embedding,
+            precedents.stream().map(Precedent::analysisId).toList());
     log.info(
-        "Assistant analysis {} of item {} ({}) of run {}: {} in {} turns{}",
+        "Assistant analysis {} of item {} ({}) of run {}: {} in {} turns, {} precedents{}",
         id,
         itemNo,
         item.category(),
         runId,
         result.analysis() == null ? result.status() : result.analysis().likelyCause(),
         result.turns(),
+        precedents.size(),
         result.proposal() == null ? "" : ", inquiry proposed");
     return store.find(id).orElseThrow();
+  }
+
+  /**
+   * The break's embedding, or null: precedents are hints (#64), so without one the analysis goes
+   * ahead with none, and its own break is not found as a precedent later. Made even with {@code
+   * max-precedents=0}: an analysis made while they are off is still one once they are on again.
+   */
+  private float[] embed(String signature, UUID runId, int itemNo) {
+    try {
+      return gemini.embed(signature);
+    } catch (GeminiClient.GeminiException e) {
+      log.warn(
+          "No embedding for item {} of run {}, so no precedents: {}",
+          itemNo,
+          runId,
+          e.getMessage());
+      return null;
+    }
   }
 
   public StoredAnalysis get(UUID analysisId) {

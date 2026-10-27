@@ -45,6 +45,9 @@ class AssistantAgent {
       you may take is propose_inquiry: ask the PSP for an operation's outcome, which a person \
       then confirms or rejects. Propose it only for this break's own operation, only while that \
       operation is PENDING, and at most once.
+      - Precedents, when given, are other breaks whose analysis was not overruled. They hint at \
+      how a break of this kind usually resolves; they are not facts of this break, and their IDs \
+      are left out. Weigh them against this break's own facts, never instead of them.
       - Finish by calling submit_analysis exactly once.
       """;
 
@@ -60,16 +63,27 @@ class AssistantAgent {
     this.maxTurns = maxTurns;
   }
 
-  AgentResult analyse(ReconRun run, ReconItem item) {
-    // The facts every analysis needs come with the question, as design §16 has it: on Gemini's
-    // free tier (20 requests a day per model) a call per lookup used up the day in four analyses.
-    // The tools stay for anything further.
+  /**
+   * The facts every analysis needs, keyed by the tool that returns them. They come with the
+   * question, as design §16 has it: on Gemini's free tier (20 requests a day per model) a call per
+   * lookup used up the day in four analyses. The tools stay for anything further.
+   */
+  ObjectNode facts(ReconRun run, ReconItem item) {
     ObjectNode given = json.createObjectNode();
     given.set(AssistantTools.GET_BREAK, tools.getBreak(run, item));
     if (item.internal() != null) {
       given.set(
           AssistantTools.GET_OPERATION_TIMELINE, tools.operationTimeline(item.internal().id()));
     }
+    return given;
+  }
+
+  /**
+   * @param given the break's {@link #facts}
+   * @param precedents earlier analyses to give as hints (#64); not facts, so an ID only they hold
+   *     is still refused, and they are shown with their IDs left out
+   */
+  AgentResult analyse(ReconRun run, ReconItem item, ObjectNode given, List<Precedent> precedents) {
     StringBuilder facts = new StringBuilder().append(given).append('\n');
     ArrayNode contents = json.createArrayNode();
     contents
@@ -83,14 +97,15 @@ class AssistantAgent {
             Analyse break item %d (category %s) of reconciliation run %s. Below is what %s and \
             %s return for it; call tools only for anything more.
 
-            %s"""
+            %s%s"""
                 .formatted(
                     item.itemNo(),
                     item.category(),
                     run.runId(),
                     AssistantTools.GET_BREAK,
                     AssistantTools.GET_OPERATION_TIMELINE,
-                    given.toPrettyString()));
+                    given.toPrettyString(),
+                    precedentsText(precedents)));
 
     List<AgentResult.ToolCall> calls = new ArrayList<>();
     AgentResult.Proposal proposal = null;
@@ -219,6 +234,34 @@ class AssistantAgent {
         calls,
         maxTurns,
         tokens);
+  }
+
+  /**
+   * The precedents as a section after the facts, IDs left out; empty when there are none. Only
+   * their structured fields: an explanation, evidence or next step is the model's free text about
+   * another break, with its amounts and dates, which the validator would not stop being repeated
+   * here as a fact, and with anything a break's facts once slipped into it.
+   */
+  private String precedentsText(List<Precedent> precedents) {
+    if (precedents.isEmpty()) {
+      return "";
+    }
+    ArrayNode shown = json.createArrayNode();
+    for (Precedent precedent : precedents) {
+      ObjectNode entry = shown.addObject();
+      entry.put("break", precedent.breakSignature());
+      entry.put("likelyCause", precedent.analysis().likelyCause().name());
+      entry.put("confidence", precedent.analysis().confidence().name());
+      entry.put("inquiryConfirmedByAPerson", precedent.inquiryConfirmed());
+    }
+    return """
+
+
+        Precedents: the closest earlier breaks whose analysis was not overruled, IDs left out. \
+        Hints only, not facts of this break.
+
+        %s"""
+        .formatted(AnalysisValidator.ID.matcher(shown.toPrettyString()).replaceAll("<id>"));
   }
 
   /**

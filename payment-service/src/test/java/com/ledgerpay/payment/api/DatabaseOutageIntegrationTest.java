@@ -5,6 +5,7 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.ledgerpay.payment.PostgresTestcontainersConfiguration;
 import com.ledgerpay.payment.idempotency.IdempotentExecutor;
 import com.ledgerpay.payment.webhook.SignedWebhooks;
 import com.ledgerpay.payment.webhook.SignedWebhooks.Event;
@@ -54,7 +55,8 @@ import org.testcontainers.junit.jupiter.Testcontainers;
 class DatabaseOutageIntegrationTest {
 
   @Container @ServiceConnection
-  static final PostgreSQLContainer<?> POSTGRES = new PostgreSQLContainer<>("postgres:16-alpine");
+  static final PostgreSQLContainer<?> POSTGRES =
+      new PostgreSQLContainer<>(PostgresTestcontainersConfiguration.IMAGE);
 
   /**
    * Looks merchants up in the database, unless told to accept any key: that lets a request get past
