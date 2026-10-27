@@ -1,67 +1,20 @@
 #!/usr/bin/env bash
 # Refuses a commit whose staged changes hold a secret (an API key such as GEMINI_API_KEY, a token, a
-# private key), before it reaches the local history; GitHub's push protection only sees it at push.
-# Uses the gitleaks image through Docker, which the project needs anyway. Enable it once with:
+# private key), before it reaches the local history. Enable the hooks once per clone with:
 #
-#   git config core.hooksPath scripts/git-hooks
+#   git config core.hooksPath "$(git rev-parse --show-toplevel)/scripts/git-hooks"
 #
 # A finding stops the commit with the file and line, the secret itself redacted. A false positive
 # that is public by design goes in .gitleaks.toml's allowlist; never commit with --no-verify to
-# get a real key in.
-#
-# It fails closed. The repository is public and CI scans only after a push, and GitHub's push
-# protection does not know every key format (Google AI Studio's AQ. keys among them), so this
-# hook is the one check before a key is published. Without Docker it uses a local gitleaks on the
-# PATH; with neither, the commit is refused. LEDGERPAY_SKIP_SECRET_SCAN=1 skips it on purpose, for
-# one command, when you know what is staged.
+# get a real key in. The scan, and how it fails closed, is in scan-secrets; pre-push scans again
+# what leaves the machine.
 set -euo pipefail
 
-IMAGE=ghcr.io/gitleaks/gitleaks:v8.30.1   # keep in step with .github/workflows/ci.yml
-repo=$(git rev-parse --show-toplevel)
-# In a worktree, .git is a file pointing into the main repository's .git directory. Both are mounted
-# at their own absolute paths, so git in the container can follow it: with only the worktree
-# mounted, gitleaks could not read the index, logged an error, exited 0, and nothing was scanned.
-common=$(cd "$repo" && cd "$(git rev-parse --git-common-dir)" && pwd)
-
-if [[ ${LEDGERPAY_SKIP_SECRET_SCAN:-} == 1 ]]; then
-  echo "pre-commit: secret scan SKIPPED (LEDGERPAY_SKIP_SECRET_SCAN=1)." >&2
-  exit 0
-fi
-
-if docker info > /dev/null 2>&1; then
-  scanner=docker
-elif command -v gitleaks > /dev/null 2>&1; then
-  scanner=local
-else
-  echo "pre-commit: Docker is not running and gitleaks is not installed, so the staged changes" >&2
-  echo "            cannot be scanned for secrets. Commit refused: start Docker, or install gitleaks," >&2
-  echo "            or, knowing what is staged, rerun with LEDGERPAY_SKIP_SECRET_SCAN=1." >&2
-  exit 1
-fi
-
-# A finding exits 3; any other failure (no image, no network, an unreadable repository) is the
-# scan's own, reported as such, and still stops the commit: a scan that did not run is not a clean
-# one. In Docker the repository is read-only, as the current user, so git inside trusts it.
-args=(git --pre-commit --staged --config "$repo/.gitleaks.toml" --redact --verbose
-  --no-banner --log-level warn --exit-code 3 "$repo")
 status=0
-if [[ $scanner == docker ]]; then
-  docker run --rm --user "$(id -u):$(id -g)" -v "$repo:$repo:ro" -v "$common:$common:ro" \
-    -w "$repo" "$IMAGE" "${args[@]}" || status=$?
-else
-  gitleaks "${args[@]}" || status=$?
+"$(dirname "$0")/scan-secrets" pre-commit --pre-commit --staged || status=$?
+if (( status == 3 )); then
+  echo >&2
+  echo "pre-commit: a secret is staged (above, redacted). Unstage it, move it to an environment" >&2
+  echo "            variable, and if it was ever pushed or shared, revoke it and make a new one." >&2
 fi
-case $status in
-  0) ;;
-  3)
-    echo >&2
-    echo "pre-commit: a secret is staged (above, redacted). Unstage it, move it to an environment" >&2
-    echo "            variable, and if it was ever pushed or shared, revoke it and make a new one." >&2
-    exit 1
-    ;;
-  *)
-    echo "pre-commit: the secret scan itself failed (exit $status), so nothing was checked." >&2
-    echo "            Commit refused; fix the scan (is the image pullable?) and commit again." >&2
-    exit 1
-    ;;
-esac
+(( status == 0 )) || exit 1

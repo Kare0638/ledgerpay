@@ -1,0 +1,32 @@
+#!/usr/bin/env bash
+# Refuses a push whose new commits hold a secret: the last check before the repository, which is
+# public, publishes them. GitHub's push protection misses some key formats (AI Studio's AQ. keys),
+# and the pre-commit hook misses commits it never saw: made before the hooks were enabled in a
+# clone, with --no-verify, or by a rebase or cherry-pick. Enabled with the other hooks:
+#
+#   git config core.hooksPath "$(git rev-parse --show-toplevel)/scripts/git-hooks"
+#
+# It scans every commit a pushed ref brings that no remote-tracking branch has yet, which is what
+# this push publishes. Commits already on a remote were published before and are not rescanned
+# (CI scans the whole history on every push).
+set -euo pipefail
+
+found=0
+while read -r local_ref local_sha remote_ref remote_sha; do
+  # A deleted ref publishes nothing.
+  [[ $local_sha =~ ^0+$ ]] && continue
+  status=0
+  "$(dirname "$0")/scan-secrets" pre-push --log-opts="$local_sha --not --remotes" || status=$?
+  case $status in
+    0) ;;
+    3) found=1 ;;
+    *) exit 1 ;;
+  esac
+done
+if (( found )); then
+  echo >&2
+  echo "pre-push: a commit being pushed holds a secret (above, redacted). Nothing was published." >&2
+  echo "          Remove it from those commits (git rebase -i, or reset and commit again), move it to" >&2
+  echo "          an environment variable, then push again." >&2
+  exit 1
+fi
