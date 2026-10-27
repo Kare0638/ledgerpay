@@ -392,6 +392,70 @@ class AssistantIntegrationTest {
         .containsExactly("true", "false", "true");
   }
 
+  /** Looking an invented ID up does not make it citable: no reply repeats what it was asked. */
+  @Test
+  void anInventedIdLookedUpIsStillRefused() throws Exception {
+    String invented = "psp_invented_7";
+    UUID inventedOperation = UUID.fromString("11111111-2222-3333-4444-555555555555");
+    gemini
+        .thenCall("find_operations", "{\"reference\": \"" + invented + "\"}")
+        .thenCall("get_operation_timeline", "{\"pspOperationId\": \"" + inventedOperation + "\"}")
+        .thenCall(
+            "submit_analysis",
+            submit(
+                "OUTCOME_NOT_RECEIVED",
+                "Operation " + inventedOperation + " under " + invented + " is stuck."))
+        .thenCall(
+            "submit_analysis", submit("OUTCOME_NOT_RECEIVED", "PENDING here, SUCCEEDED there."));
+
+    JsonNode stored = analyse().body();
+
+    assertThat(stored.path("status").asText()).isEqualTo("COMPLETED");
+    assertThat(stored.path("toolCalls").findValuesAsText("ok"))
+        .containsExactly("true", "true", "false", "true");
+    String refusal =
+        json.readTree(gemini.calls().get(3).body())
+            .path("contents")
+            .path(6)
+            .path("parts")
+            .path(0)
+            .path("functionResponse")
+            .path("response")
+            .path("error")
+            .asText();
+    assertThat(refusal).contains(invented, inventedOperation.toString());
+  }
+
+  /** The reason is what the person deciding reads: it may cite only IDs from the facts too. */
+  @Test
+  void aProposalWhoseReasonCitesAnInventedIdIsRefused() throws Exception {
+    gemini
+        .thenCall(
+            "propose_inquiry",
+            "{\"pspOperationId\": \""
+                + p2.id()
+                + "\", \"reason\": \"The PSP settled it as psp_invented_9\"}")
+        .thenCall(
+            "submit_analysis", submit("OUTCOME_NOT_RECEIVED", "PENDING here, SUCCEEDED there."));
+
+    JsonNode stored = analyse().body();
+
+    assertThat(stored.path("status").asText()).isEqualTo("COMPLETED");
+    assertThat(stored.path("proposal").isNull()).isTrue();
+    assertThat(stored.path("toolCalls").get(0).path("ok").asBoolean()).isFalse();
+    String refusal =
+        json.readTree(gemini.calls().get(1).body())
+            .path("contents")
+            .path(2)
+            .path("parts")
+            .path(0)
+            .path("functionResponse")
+            .path("response")
+            .path("error")
+            .asText();
+    assertThat(refusal).startsWith("the reason cites IDs the tools never returned: psp_invented_9");
+  }
+
   @Test
   void twoRefusedSubmissionsAreStoredAsInvalidOutputWithNothingToShow() throws Exception {
     gemini

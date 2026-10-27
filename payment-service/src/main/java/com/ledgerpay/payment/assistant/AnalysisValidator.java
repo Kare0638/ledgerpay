@@ -52,10 +52,23 @@ final class AnalysisValidator {
     List<String> evidence = lines(args.path("evidence"), "evidence", 1, MAX_EVIDENCE, errors);
     List<String> nextSteps = lines(args.path("nextSteps"), "nextSteps", 0, MAX_STEPS, errors);
 
-    Set<String> unknown = new LinkedHashSet<>();
     List<String> texts = new ArrayList<>(evidence);
     texts.addAll(nextSteps);
     texts.add(explanation);
+    Set<String> unknown = unknownIds(texts, facts);
+    if (!unknown.isEmpty()) {
+      errors.add(citesUnknown(unknown));
+    }
+    return new Result(
+        errors.isEmpty()
+            ? new Analysis(cause, confidence, explanation.strip(), evidence, nextSteps)
+            : null,
+        List.copyOf(errors));
+  }
+
+  /** The payment, operation and PSP IDs in {@code texts} that {@code facts} never mentions. */
+  static Set<String> unknownIds(List<String> texts, String facts) {
+    Set<String> unknown = new LinkedHashSet<>();
     for (String text : texts) {
       Matcher id = ID.matcher(text);
       while (id.find()) {
@@ -64,17 +77,13 @@ final class AnalysisValidator {
         }
       }
     }
-    if (!unknown.isEmpty()) {
-      errors.add(
-          "cites IDs the tools never returned: "
-              + String.join(", ", unknown)
-              + "; cite only IDs from the facts");
-    }
-    return new Result(
-        errors.isEmpty()
-            ? new Analysis(cause, confidence, explanation.strip(), evidence, nextSteps)
-            : null,
-        List.copyOf(errors));
+    return unknown;
+  }
+
+  static String citesUnknown(Set<String> unknown) {
+    return "cites IDs the tools never returned: "
+        + String.join(", ", unknown)
+        + "; cite only IDs from the facts";
   }
 
   private static <E extends Enum<E>> E enumValue(

@@ -9,6 +9,7 @@ import com.ledgerpay.payment.reconciliation.ReconRun;
 import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.List;
+import java.util.Set;
 import java.util.UUID;
 
 /**
@@ -144,7 +145,7 @@ class AssistantAgent {
             reply = ok ? tools.findOperations(reference) : tools.error("reference is required");
           }
           case PROPOSE_INQUIRY -> {
-            String refusal = proposalRefusal(item, proposal, args);
+            String refusal = proposalRefusal(item, proposal, args, facts.toString());
             ok = refusal == null;
             if (ok) {
               proposal =
@@ -191,10 +192,12 @@ class AssistantAgent {
           }
           default -> {
             ok = false;
-            reply = tools.error("no such tool: " + name);
+            reply = tools.error("no such tool");
           }
         }
         calls.add(new AgentResult.ToolCall(name, args, ok));
+        // Every reply counts as facts the analysis may cite, so no reply repeats the model's own
+        // arguments: an invented ID, looked up once, would otherwise become citable.
         facts.append(reply).append('\n');
         replies.add(functionResponse(name, reply));
       }
@@ -218,8 +221,12 @@ class AssistantAgent {
         tokens);
   }
 
-  /** Why a proposal is refused, or null when it may be recorded. */
-  private String proposalRefusal(ReconItem item, AgentResult.Proposal earlier, JsonNode args) {
+  /**
+   * Why a proposal is refused, or null when it may be recorded. Its reason is what the person
+   * deciding reads, so it may cite only IDs from the facts, like the analysis.
+   */
+  private String proposalRefusal(
+      ReconItem item, AgentResult.Proposal earlier, JsonNode args, String facts) {
     if (earlier != null) {
       return "an inquiry was already proposed; at most one per analysis";
     }
@@ -235,8 +242,13 @@ class AssistantAgent {
     if (!"PENDING".equals(status)) {
       return "the operation is " + status + ", not PENDING: an inquiry can change nothing";
     }
-    if (args.path("reason").asText("").isBlank()) {
+    String reason = args.path("reason").asText("");
+    if (reason.isBlank()) {
       return "a reason is required";
+    }
+    Set<String> unknown = AnalysisValidator.unknownIds(List.of(reason), facts);
+    if (!unknown.isEmpty()) {
+      return "the reason " + AnalysisValidator.citesUnknown(unknown);
     }
     return null;
   }

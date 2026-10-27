@@ -18,7 +18,9 @@ import org.springframework.stereotype.Component;
 
 /**
  * The facts the assistant may read (design §16), each a read-only query returning IDs, statuses,
- * amounts and times; never names, keys or anything outside the books. Nothing here writes.
+ * amounts and times; never names, keys or anything outside the books. Nothing here writes. A reply
+ * never repeats the caller's arguments: whatever a reply holds counts as a fact the analysis may
+ * cite (AnalysisValidator), so an echoed ID would pass as one the books returned.
  */
 @Component
 class AssistantTools {
@@ -91,7 +93,7 @@ class AssistantTools {
             .stream()
             .findFirst();
     if (operation.isEmpty()) {
-      facts.put("error", "no operation " + operationId);
+      facts.put("error", "no such operation");
       return facts;
     }
     Map<String, Object> row = operation.get();
@@ -158,7 +160,6 @@ class AssistantTools {
   /** Our operations with this PSP reference or request ID, at most five. */
   ObjectNode findOperations(String reference) {
     ObjectNode facts = json.createObjectNode();
-    facts.put("reference", reference);
     ArrayNode matches = facts.putArray("matches");
     List<Map<String, Object>> rows =
         jdbc.sql(
