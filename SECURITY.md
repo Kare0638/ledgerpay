@@ -17,9 +17,13 @@ command that needs it; or a GitHub Actions secret. For the Gemini key:
 
 ```bash
 mkdir -p ~/.config/ledgerpay
-# Typed at a hidden prompt, so the key is in no command line and no shell history; umask 077 makes
-# the file readable by you alone from the moment it exists.
-(umask 077; read -rsp 'Gemini key: ' k; printf 'export GEMINI_API_KEY=%s\n' "$k" > ~/.config/ledgerpay/gemini.env)
+# bash: typed at a hidden prompt, so the key is in no command line and no shell history. Empty
+# input leaves a working file alone. umask 077 covers a new file, chmod 600 one that already was
+# readable by others. (zsh's read differs: there, use read -rs 'k?Gemini key: '.)
+(umask 077; read -rsp 'Gemini key: ' k; echo
+ [[ -n $k ]] || { echo 'no key typed; nothing changed' >&2; exit 1; }
+ printf 'export GEMINI_API_KEY=%s\n' "$k" > ~/.config/ledgerpay/gemini.env
+ chmod 600 ~/.config/ledgerpay/gemini.env)
 scripts/with-gemini.sh ./mvnw …     # the key is set for this command only
 ```
 
@@ -29,7 +33,9 @@ other terminal closed (an open shell writes its history back when it exits).
 
 `scripts/with-gemini.sh` refuses a file inside the repository or readable by others, and passes on
 the key alone. Exporting it from `~/.bashrc` would hand it to every process started from a shell:
-build plugins, package install scripts and editor extensions inherit the environment. Never in a tracked file: not `application.yml`, not `docker-compose.yml`, not a
+build plugins, package install scripts and editor extensions inherit the environment.
+
+Never in a tracked file: not `application.yml`, not `docker-compose.yml`, not a
 `.env` file (`.env`, `.env.*`, `*.env` and `.envrc` are git-ignored), and not baked into an image:
 the Dockerfile takes no `ARG` or `ENV` for them, and `.dockerignore` keeps the same files out of
 the build context, which the build stage copies whole.
@@ -70,7 +76,10 @@ Four layers, each catching what the one before missed:
    The path is absolute on purpose. A relative `scripts/git-hooks` is looked up in the working tree
    that runs the hook, so a git worktree checked out at an older commit runs that commit's hooks, or
    none: a test push from a worktree on a commit before the pre-push hook existed published a fake
-   key. With the absolute path every worktree uses the main checkout's hooks.
+   key. With the absolute path every worktree uses the main checkout's hooks, and the scan reads its
+   rules from there too, so a worktree on an old commit cannot scan with old rules. The one gap
+   left: if the main checkout itself is on a commit from before a hook existed, git skips that hook
+   without a word.
 
 2. **Pre-push hook** (`scripts/git-hooks/pre-push`): scans every commit the push would publish
    (what no remote-tracking branch has yet) and refuses the push, with the same scanner and the
