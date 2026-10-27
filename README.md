@@ -39,7 +39,59 @@ A reconciliation break (a payment the books and the PSP disagree on) needs an en
 - **Operated like a production dependency**: the API key travels only in a header, is redacted from every error, and reaches the container as a Compose secret; four layers of secret scanning ([SECURITY.md](SECURITY.md)). 429/500/503 are retried with backoff, a daily-quota 429 fails at once, and an unreachable model is a clean 503.
 - **Tested without the model**: CI runs the agent against a scripted Gemini stub (tool calls, thought signatures, refusals, rate limits) and a deterministic bag-of-words embedding, so retrieval ranking, the grounding checks and the guardrails are tested end to end against a real Postgres with pgvector.
 
-Next: an evaluation on the demo's breaks, with and without retrieval, published with its failures (#26).
+### Live Gemini evaluation: with and without RAG
+
+On **27 October 2026**, a paired experiment used real Gemini generation and embeddings, the
+production agent and tools, and PostgreSQL/pgvector. Five held-out cases reproduce the demo's lost
+webhook and four report variants. These are small SQL-seeded histories passed through the real
+CSV importer, reconciler and ledger integrity check, rather than a replay of the full mock-PSP demo.
+Each RAG analysis receives three retrieved precedents from a frozen, separately generated five-case
+corpus; its baseline receives the same facts without precedents. Evaluation answers never enter
+retrieval. [Protocol, reproduction command and limitations](docs/evaluation/README.md).
+
+The complete comparison used **`gemini-3.5-flash-lite`**, with the five historical analyses generated
+by `gemini-3.5-flash` in an earlier run, re-embedded and validated before reuse. Same corpus and
+facts in both arms; only the RAG arm sees the retrieved precedents.
+[All ten outputs, facts, retrieved precedents and tool calls](docs/evaluation/2026-10-27-gemini-3.5-flash-lite.json).
+
+| Injected break | Expected cause | Without RAG | With RAG | Turns, without / with |
+|---|---|---|---|---|
+| Lost webhook | `OUTCOME_NOT_RECEIVED` | Correct | Correct | 2 / 2 |
+| Duplicate report row | `DUPLICATE_IN_REPORT` | Correct | Correct | 1 / 1 |
+| Missing report row | `MISSING_FROM_REPORT` | Correct | Correct | 2 / 1 |
+| Amount 5000 vs 5100 minor units | `FIELD_MISMATCH` | Correct | Correct | 1 / 1 |
+| Unknown transaction | `UNKNOWN_TRANSACTION` | **Wrong: `MISSING_FROM_REPORT`** | Correct | 3 / 3 |
+
+Both arms completed **5/5** analyses and passed schema/ID validation; cause labels were correct on
+**4/5 without RAG, 5/5 with RAG**. Both proposed an inquiry only for the lost-webhook case, targeting
+the correct operation; no evaluation proposal was confirmed. Total turns fell **9 → 8**, while
+the agent's accumulated token count rose **19,518 → 20,319** with retrieval. This single run on
+five simple cases with a curated same-type precedent available for every query shows one corrected
+label, not a statistically established improvement or production accuracy.
+
+**Observed failures and limits:**
+
+- **Correct prose, wrong label, HIGH confidence.** Without RAG, the unknown-transaction answer
+  correctly described a report entry absent internally, but selected `MISSING_FROM_REPORT`.
+  The schema validator accepts that enum and does not check whether it agrees with the evidence.
+  The same contradiction occurred in Flash Lite's earlier corpus-generation attempt, which stopped
+  before evaluation. [Recorded corpus failure](docs/evaluation/2026-10-27-gemini-3.5-flash-lite-corpus-failure.json).
+- **Money units remain ambiguous in both arms.** The amount-mismatch answers described minor-unit
+  values as “5000 GBP” and “5100 GBP”, without identifying £50 and £51. A correct label and grounded
+  IDs do not validate monetary statements.
+- **Retrieval can encourage unsupported claims.** The RAG lost-webhook answer said a precedent
+  “was resolved”; the provided precedent only records that a person confirmed an inquiry.
+  Confirmation is not proof that the inquiry ran or the break closed. It also advised updating
+  internal books without specifying the normal inquiry/confirmation path. The executable tools
+  remained safe, but the prose still needs review.
+- **Availability failures are part of the result.** The first `gemini-3.5-flash` run completed only
+  the lost-webhook pair (both correct, 3/2 turns, 11,225/7,494 tokens without/with RAG); its other
+  **eight analyses failed on daily quota**. That is 1/5 completed per arm, not five-case accuracy.
+  A `gemini-2.5-flash-lite` fallback returned 404 despite appearing in the model list. Neither run
+  is pooled into the complete comparison above.
+  [Quota failures](docs/evaluation/2026-10-27-gemini-3.5-flash.json),
+  [unavailable-model failure](docs/evaluation/2026-10-27-gemini-2.5-flash-lite-unavailable.json).
+
 
 ## Planned
 
@@ -47,7 +99,7 @@ Next: an evaluation on the demo's breaks, with and without retrieval, published 
 |---|---|---|
 | M3: reconciliation and observability | A recorded walkthrough of the reconciliation demo | #21 |
 | M4: performance and cloud | Published k6 results, Terraform for ECS Fargate and RDS | #23, #24 |
-| Optional | The assistant's evaluation on the demo's breaks, published with its failures; SQS/SNS adapter | #26, #25 |
+| Optional | Broader assistant evaluation beyond the five-case smoke experiment; SQS/SNS adapter | #26, #25 |
 
 ## Architecture
 

@@ -1,0 +1,492 @@
+{
+  "startedAt" : "2026-10-27T09:30:29.921175759Z",
+  "model" : "gemini-3.5-flash-lite",
+  "embeddingModel" : "gemini-embedding-001",
+  "maxTurns" : 8,
+  "maxPrecedents" : 3,
+  "generationConfig" : "API defaults; no temperature or seed override",
+  "fixtureSource" : "SQL-seeded demo-equivalent breaks, real import/reconciliation/ledger",
+  "training" : [ {
+    "scenario" : "LOST_WEBHOOK",
+    "expectedCause" : "OUTCOME_NOT_RECEIVED",
+    "expectedProposal" : true,
+    "runId" : "681a14c5-5839-4294-88ce-27531c7ae4ed",
+    "itemNo" : 2,
+    "facts" : {
+      "get_break" : {
+        "runId" : "681a14c5-5839-4294-88ce-27531c7ae4ed",
+        "itemNo" : 2,
+        "category" : "STATUS_MISMATCH",
+        "businessDate" : "2001-01-01",
+        "reportVersion" : 1,
+        "runSnapshotAt" : "2026-10-27T09:30:30.091390Z",
+        "pspReference" : "psp_a8ef008f-6ec8-46d3-ad86-d4fc535ad827",
+        "reportLines" : [ {
+          "line" : 3,
+          "pspReference" : "psp_a8ef008f-6ec8-46d3-ad86-d4fc535ad827",
+          "pspRequestId" : "req_1960807a-d9d6-4589-a61f-edf464de2cf6",
+          "txnType" : "CAPTURE",
+          "merchantId" : "m_eval_c3b2b4fb-ae7b-4788-9236-ded76e82d12d",
+          "amountMinor" : 40000,
+          "currency" : "GBP",
+          "succeededAt" : "2001-01-01T10:00:00Z"
+        } ],
+        "ourOperationAtSnapshot" : {
+          "id" : "b0869fb3-700d-46e7-a9a5-82e29a3eb8a6",
+          "paymentId" : "2b75fe36-a58a-4831-a80c-7cf1d89c050b",
+          "merchantId" : "m_eval_c3b2b4fb-ae7b-4788-9236-ded76e82d12d",
+          "type" : "CAPTURE",
+          "pspRequestId" : "req_1960807a-d9d6-4589-a61f-edf464de2cf6",
+          "pspReference" : "psp_a8ef008f-6ec8-46d3-ad86-d4fc535ad827",
+          "amountMinor" : 40000,
+          "currency" : "GBP",
+          "status" : "PENDING",
+          "succeededAt" : null
+        },
+        "diff" : {
+          "status" : {
+            "external" : "SUCCEEDED",
+            "internal" : "PENDING"
+          }
+        }
+      },
+      "get_operation_timeline" : {
+        "operation" : {
+          "pspOperationId" : "b0869fb3-700d-46e7-a9a5-82e29a3eb8a6",
+          "type" : "CAPTURE",
+          "status" : "PENDING",
+          "amountMinor" : 40000,
+          "currency" : "GBP",
+          "pspRequestId" : "req_1960807a-d9d6-4589-a61f-edf464de2cf6",
+          "pspReference" : "psp_a8ef008f-6ec8-46d3-ad86-d4fc535ad827",
+          "attempts" : 0,
+          "consecutiveFailures" : 0,
+          "needsReview" : false,
+          "lastError" : null,
+          "createdAt" : "2026-10-27T09:30:30.043467Z",
+          "updatedAt" : "2026-10-27T09:30:30.043467Z",
+          "succeededAt" : null,
+          "nextAttemptAt" : "2026-10-27T09:45:30.043467Z"
+        },
+        "payment" : {
+          "paymentId" : "2b75fe36-a58a-4831-a80c-7cf1d89c050b",
+          "status" : "CAPTURE_PENDING",
+          "amountMinor" : 40000,
+          "capturedMinor" : 0,
+          "refundedMinor" : 0,
+          "refundReservedMinor" : 0
+        },
+        "journals" : [ ],
+        "webhooksReceived" : [ ]
+      }
+    },
+    "elapsedMs" : 6862,
+    "result" : {
+      "status" : "COMPLETED",
+      "analysis" : {
+        "likelyCause" : "OUTCOME_NOT_RECEIVED",
+        "confidence" : "HIGH",
+        "explanation" : "The settlement report indicates that the CAPTURE transaction succeeded at the PSP, but our internal operation remains PENDING because webhook/outcome updates were not processed or received. An inquiry has been proposed to confirm the operation's outcome with the PSP.",
+        "evidence" : [ "The reconciliation report shows the CAPTURE operation psp_a8ef008f-6ec8-46d3-ad86-d4fc535ad827 succeeded at 2001-01-01T10:00:00Z with amount 40000 GBP.", "Our operation b0869fb3-700d-46e7-a9a5-82e29a3eb8a6 is in PENDING status internally.", "No webhooks have been received and no attempts have been made (attempts: 0)." ],
+        "nextSteps" : [ "Wait for a person to confirm or reject the proposed inquiry with the PSP.", "Once confirmed, reconcile the internal operation state to match the successful PSP status." ]
+      },
+      "error" : null,
+      "proposal" : {
+        "pspOperationId" : "b0869fb3-700d-46e7-a9a5-82e29a3eb8a6",
+        "reason" : "The operation is currently PENDING internally, but the PSP settlement report shows the CAPTURE succeeded with amount 40000 GBP on 2001-01-01."
+      },
+      "toolCalls" : [ {
+        "tool" : "propose_inquiry",
+        "args" : {
+          "reason" : "The operation is currently PENDING internally, but the PSP settlement report shows the CAPTURE succeeded with amount 40000 GBP on 2001-01-01.",
+          "pspOperationId" : "b0869fb3-700d-46e7-a9a5-82e29a3eb8a6"
+        },
+        "ok" : true
+      }, {
+        "tool" : "submit_analysis",
+        "args" : {
+          "nextSteps" : [ "Wait for a person to confirm or reject the proposed inquiry with the PSP.", "Once confirmed, reconcile the internal operation state to match the successful PSP status." ],
+          "confidence" : "HIGH",
+          "likelyCause" : "OUTCOME_NOT_RECEIVED",
+          "explanation" : "The settlement report indicates that the CAPTURE transaction succeeded at the PSP, but our internal operation remains PENDING because webhook/outcome updates were not processed or received. An inquiry has been proposed to confirm the operation's outcome with the PSP.",
+          "evidence" : [ "The reconciliation report shows the CAPTURE operation psp_a8ef008f-6ec8-46d3-ad86-d4fc535ad827 succeeded at 2001-01-01T10:00:00Z with amount 40000 GBP.", "Our operation b0869fb3-700d-46e7-a9a5-82e29a3eb8a6 is in PENDING status internally.", "No webhooks have been received and no attempts have been made (attempts: 0)." ]
+        },
+        "ok" : true
+      } ],
+      "turns" : 2,
+      "tokens" : 4858
+    },
+    "analysisId" : "17463e3b-3b1a-4ace-8999-ed371c375899"
+  }, {
+    "scenario" : "DUPLICATE_ROW",
+    "expectedCause" : "DUPLICATE_IN_REPORT",
+    "expectedProposal" : false,
+    "runId" : "39f06074-fb6d-4628-ba13-09ac8293f377",
+    "itemNo" : 2,
+    "facts" : {
+      "get_break" : {
+        "runId" : "39f06074-fb6d-4628-ba13-09ac8293f377",
+        "itemNo" : 2,
+        "category" : "DUPLICATE_EXTERNAL",
+        "businessDate" : "2001-01-08",
+        "reportVersion" : 1,
+        "runSnapshotAt" : "2026-10-27T09:30:38.410752Z",
+        "pspReference" : "psp_d79430bc-cd84-4945-ae40-4afcd6d98966",
+        "reportLines" : [ {
+          "line" : 3,
+          "pspReference" : "psp_d79430bc-cd84-4945-ae40-4afcd6d98966",
+          "pspRequestId" : "req_06e12984-a988-42c7-a53b-1bae37fff402",
+          "txnType" : "CAPTURE",
+          "merchantId" : "m_eval_5ca30275-fb91-409c-94ed-2978d0bf208b",
+          "amountMinor" : 20000,
+          "currency" : "GBP",
+          "succeededAt" : "2001-01-08T10:00:00Z"
+        }, {
+          "line" : 4,
+          "pspReference" : "psp_d79430bc-cd84-4945-ae40-4afcd6d98966",
+          "pspRequestId" : "req_06e12984-a988-42c7-a53b-1bae37fff402",
+          "txnType" : "CAPTURE",
+          "merchantId" : "m_eval_5ca30275-fb91-409c-94ed-2978d0bf208b",
+          "amountMinor" : 20000,
+          "currency" : "GBP",
+          "succeededAt" : "2001-01-08T10:00:00Z"
+        } ],
+        "ourOperationAtSnapshot" : {
+          "id" : "1d0f4036-a61d-49b3-ba46-15817d5df4b9",
+          "paymentId" : "99c75ce8-b574-46bb-9d96-6006e2bc5526",
+          "merchantId" : "m_eval_5ca30275-fb91-409c-94ed-2978d0bf208b",
+          "type" : "CAPTURE",
+          "pspRequestId" : "req_06e12984-a988-42c7-a53b-1bae37fff402",
+          "pspReference" : "psp_d79430bc-cd84-4945-ae40-4afcd6d98966",
+          "amountMinor" : 20000,
+          "currency" : "GBP",
+          "status" : "SUCCEEDED",
+          "succeededAt" : "2001-01-08T10:00:00Z"
+        },
+        "diff" : { }
+      },
+      "get_operation_timeline" : {
+        "operation" : {
+          "pspOperationId" : "1d0f4036-a61d-49b3-ba46-15817d5df4b9",
+          "type" : "CAPTURE",
+          "status" : "SUCCEEDED",
+          "amountMinor" : 20000,
+          "currency" : "GBP",
+          "pspRequestId" : "req_06e12984-a988-42c7-a53b-1bae37fff402",
+          "pspReference" : "psp_d79430bc-cd84-4945-ae40-4afcd6d98966",
+          "attempts" : 0,
+          "consecutiveFailures" : 0,
+          "needsReview" : false,
+          "lastError" : null,
+          "createdAt" : "2026-10-27T09:30:38.390421Z",
+          "updatedAt" : "2026-10-27T09:30:38.390421Z",
+          "succeededAt" : "2001-01-08T10:00:00Z",
+          "nextAttemptAt" : "2026-10-27T09:45:38.390421Z"
+        },
+        "payment" : {
+          "paymentId" : "99c75ce8-b574-46bb-9d96-6006e2bc5526",
+          "status" : "CAPTURED",
+          "amountMinor" : 20000,
+          "capturedMinor" : 20000,
+          "refundedMinor" : 0,
+          "refundReservedMinor" : 0
+        },
+        "journals" : [ {
+          "entryType" : "CAPTURE",
+          "postedAt" : "2026-10-27T09:30:38.390421Z"
+        } ],
+        "webhooksReceived" : [ ]
+      }
+    },
+    "elapsedMs" : 3887,
+    "result" : {
+      "status" : "COMPLETED",
+      "analysis" : {
+        "likelyCause" : "DUPLICATE_IN_REPORT",
+        "confidence" : "HIGH",
+        "explanation" : "The settlement report erroneously lists the same PSP reference and request ID twice (on line 3 and line 4), while our books correctly record a single successful operation. This is a duplicate entry in the external settlement report.",
+        "evidence" : [ "The break category is DUPLICATE_EXTERNAL.", "The settlement report contains two identical lines (line 3 and line 4) with the same pspReference (psp_d79430bc-cd84-4945-ae40-4afcd6d98966) and pspRequestId (req_06e12984-a988-42c7-a53b-1bae37fff402).", "Our operation 1d0f4036-a61d-49b3-ba46-15817d5df4b9 successfully matched once with status SUCCEEDED." ],
+        "nextSteps" : [ "Notify the PSP regarding the duplicate entry in the settlement report.", "No action is needed on our internal books since our operation and payment records are correct." ]
+      },
+      "error" : null,
+      "proposal" : null,
+      "toolCalls" : [ {
+        "tool" : "submit_analysis",
+        "args" : {
+          "explanation" : "The settlement report erroneously lists the same PSP reference and request ID twice (on line 3 and line 4), while our books correctly record a single successful operation. This is a duplicate entry in the external settlement report.",
+          "confidence" : "HIGH",
+          "nextSteps" : [ "Notify the PSP regarding the duplicate entry in the settlement report.", "No action is needed on our internal books since our operation and payment records are correct." ],
+          "evidence" : [ "The break category is DUPLICATE_EXTERNAL.", "The settlement report contains two identical lines (line 3 and line 4) with the same pspReference (psp_d79430bc-cd84-4945-ae40-4afcd6d98966) and pspRequestId (req_06e12984-a988-42c7-a53b-1bae37fff402).", "Our operation 1d0f4036-a61d-49b3-ba46-15817d5df4b9 successfully matched once with status SUCCEEDED." ],
+          "likelyCause" : "DUPLICATE_IN_REPORT"
+        },
+        "ok" : true
+      } ],
+      "turns" : 1,
+      "tokens" : 2728
+    },
+    "analysisId" : "65489a16-2734-426d-8398-2f62a12237f3"
+  }, {
+    "scenario" : "MISSING_ROW",
+    "expectedCause" : "MISSING_FROM_REPORT",
+    "expectedProposal" : false,
+    "runId" : "428f2fb0-3136-4010-8cdb-17c1a1b5f57c",
+    "itemNo" : 2,
+    "facts" : {
+      "get_break" : {
+        "runId" : "428f2fb0-3136-4010-8cdb-17c1a1b5f57c",
+        "itemNo" : 2,
+        "category" : "MISSING_EXTERNAL",
+        "businessDate" : "2001-01-15",
+        "reportVersion" : 1,
+        "runSnapshotAt" : "2026-10-27T09:30:42.919051Z",
+        "pspReference" : "psp_601eb0ea-202d-4fa9-a3a5-1fdfc528530d",
+        "reportLines" : [ ],
+        "ourOperationAtSnapshot" : {
+          "id" : "1a341881-6031-425c-8f39-924618e056de",
+          "paymentId" : "430822bf-c6d6-4dcf-b00f-cb9625d1ae5d",
+          "merchantId" : "m_eval_0181574b-bdc3-4b8a-a396-656817da8a2c",
+          "type" : "CAPTURE",
+          "pspRequestId" : "req_aa4e1a08-e51d-4b35-8084-c2dfa041473c",
+          "pspReference" : "psp_601eb0ea-202d-4fa9-a3a5-1fdfc528530d",
+          "amountMinor" : 10000,
+          "currency" : "GBP",
+          "status" : "SUCCEEDED",
+          "succeededAt" : "2001-01-15T10:00:00Z"
+        },
+        "diff" : { }
+      },
+      "get_operation_timeline" : {
+        "operation" : {
+          "pspOperationId" : "1a341881-6031-425c-8f39-924618e056de",
+          "type" : "CAPTURE",
+          "status" : "SUCCEEDED",
+          "amountMinor" : 10000,
+          "currency" : "GBP",
+          "pspRequestId" : "req_aa4e1a08-e51d-4b35-8084-c2dfa041473c",
+          "pspReference" : "psp_601eb0ea-202d-4fa9-a3a5-1fdfc528530d",
+          "attempts" : 0,
+          "consecutiveFailures" : 0,
+          "needsReview" : false,
+          "lastError" : null,
+          "createdAt" : "2026-10-27T09:30:42.904326Z",
+          "updatedAt" : "2026-10-27T09:30:42.904326Z",
+          "succeededAt" : "2001-01-15T10:00:00Z",
+          "nextAttemptAt" : "2026-10-27T09:45:42.904326Z"
+        },
+        "payment" : {
+          "paymentId" : "430822bf-c6d6-4dcf-b00f-cb9625d1ae5d",
+          "status" : "CAPTURED",
+          "amountMinor" : 10000,
+          "capturedMinor" : 10000,
+          "refundedMinor" : 0,
+          "refundReservedMinor" : 0
+        },
+        "journals" : [ {
+          "entryType" : "CAPTURE",
+          "postedAt" : "2026-10-27T09:30:42.904326Z"
+        } ],
+        "webhooksReceived" : [ ]
+      }
+    },
+    "elapsedMs" : 3294,
+    "result" : {
+      "status" : "COMPLETED",
+      "analysis" : {
+        "likelyCause" : "MISSING_FROM_REPORT",
+        "confidence" : "HIGH",
+        "explanation" : "Our books record the operation 1a341881-6031-425c-8f39-924618e056de as SUCCEEDED, but it is missing from the PSP settlement report for business date 2001-01-15. Since the operation status is already SUCCEEDED and not PENDING, no inquiry can be proposed.",
+        "evidence" : [ "The operation 1a341881-6031-425c-8f39-924618e056de has status SUCCEEDED in our books.", "The report lines array is empty, meaning the PSP report for 2001-01-15 does not contain reference psp_601eb0ea-202d-4fa9-a3a5-1fdfc528530d.", "The operation status is not PENDING, so propose_inquiry cannot be used." ],
+        "nextSteps" : [ "Verify with the PSP why transaction psp_601eb0ea-202d-4fa9-a3a5-1fdfc528530d was omitted from the settlement report for 2001-01-15." ]
+      },
+      "error" : null,
+      "proposal" : null,
+      "toolCalls" : [ {
+        "tool" : "submit_analysis",
+        "args" : {
+          "explanation" : "Our books record the operation 1a341881-6031-425c-8f39-924618e056de as SUCCEEDED, but it is missing from the PSP settlement report for business date 2001-01-15. Since the operation status is already SUCCEEDED and not PENDING, no inquiry can be proposed.",
+          "confidence" : "HIGH",
+          "nextSteps" : [ "Verify with the PSP why transaction psp_601eb0ea-202d-4fa9-a3a5-1fdfc528530d was omitted from the settlement report for 2001-01-15." ],
+          "evidence" : [ "The operation 1a341881-6031-425c-8f39-924618e056de has status SUCCEEDED in our books.", "The report lines array is empty, meaning the PSP report for 2001-01-15 does not contain reference psp_601eb0ea-202d-4fa9-a3a5-1fdfc528530d.", "The operation status is not PENDING, so propose_inquiry cannot be used." ],
+          "likelyCause" : "MISSING_FROM_REPORT"
+        },
+        "ok" : true
+      } ],
+      "turns" : 1,
+      "tokens" : 2372
+    },
+    "analysisId" : "3d0b9b34-7202-4dc9-a2e9-6b15041c9a55"
+  }, {
+    "scenario" : "WRONG_AMOUNT",
+    "expectedCause" : "FIELD_MISMATCH",
+    "expectedProposal" : false,
+    "runId" : "486be07d-4cc7-4498-9f13-2c23cf7b2998",
+    "itemNo" : 2,
+    "facts" : {
+      "get_break" : {
+        "runId" : "486be07d-4cc7-4498-9f13-2c23cf7b2998",
+        "itemNo" : 2,
+        "category" : "AMOUNT_MISMATCH",
+        "businessDate" : "2001-01-22",
+        "reportVersion" : 1,
+        "runSnapshotAt" : "2026-10-27T09:30:46.844802Z",
+        "pspReference" : "psp_0b5b4249-76d4-4203-b192-557589cfb3d4",
+        "reportLines" : [ {
+          "line" : 3,
+          "pspReference" : "psp_0b5b4249-76d4-4203-b192-557589cfb3d4",
+          "pspRequestId" : "req_e1ea5851-5a6a-42c6-ab28-604eedfe2c4e",
+          "txnType" : "CAPTURE",
+          "merchantId" : "m_eval_631aace2-e3c5-48a9-9185-4eee511260af",
+          "amountMinor" : 10200,
+          "currency" : "GBP",
+          "succeededAt" : "2001-01-22T10:00:00Z"
+        } ],
+        "ourOperationAtSnapshot" : {
+          "id" : "bcd98a40-a655-4b03-8a2c-0684535d2340",
+          "paymentId" : "0f98af27-79f7-4173-a3d6-7ad9dfecca30",
+          "merchantId" : "m_eval_631aace2-e3c5-48a9-9185-4eee511260af",
+          "type" : "CAPTURE",
+          "pspRequestId" : "req_e1ea5851-5a6a-42c6-ab28-604eedfe2c4e",
+          "pspReference" : "psp_0b5b4249-76d4-4203-b192-557589cfb3d4",
+          "amountMinor" : 10000,
+          "currency" : "GBP",
+          "status" : "SUCCEEDED",
+          "succeededAt" : "2001-01-22T10:00:00Z"
+        },
+        "diff" : {
+          "amount_minor" : {
+            "external" : 10200,
+            "internal" : 10000
+          }
+        }
+      },
+      "get_operation_timeline" : {
+        "operation" : {
+          "pspOperationId" : "bcd98a40-a655-4b03-8a2c-0684535d2340",
+          "type" : "CAPTURE",
+          "status" : "SUCCEEDED",
+          "amountMinor" : 10000,
+          "currency" : "GBP",
+          "pspRequestId" : "req_e1ea5851-5a6a-42c6-ab28-604eedfe2c4e",
+          "pspReference" : "psp_0b5b4249-76d4-4203-b192-557589cfb3d4",
+          "attempts" : 0,
+          "consecutiveFailures" : 0,
+          "needsReview" : false,
+          "lastError" : null,
+          "createdAt" : "2026-10-27T09:30:46.831944Z",
+          "updatedAt" : "2026-10-27T09:30:46.831944Z",
+          "succeededAt" : "2001-01-22T10:00:00Z",
+          "nextAttemptAt" : "2026-10-27T09:45:46.831944Z"
+        },
+        "payment" : {
+          "paymentId" : "0f98af27-79f7-4173-a3d6-7ad9dfecca30",
+          "status" : "CAPTURED",
+          "amountMinor" : 10000,
+          "capturedMinor" : 10000,
+          "refundedMinor" : 0,
+          "refundReservedMinor" : 0
+        },
+        "journals" : [ {
+          "entryType" : "CAPTURE",
+          "postedAt" : "2026-10-27T09:30:46.831944Z"
+        } ],
+        "webhooksReceived" : [ ]
+      }
+    },
+    "elapsedMs" : 2239,
+    "result" : {
+      "status" : "COMPLETED",
+      "analysis" : {
+        "likelyCause" : "FIELD_MISMATCH",
+        "confidence" : "HIGH",
+        "explanation" : "The settlement report shows a higher amount (10200 minor units) than what was recorded in our books and operation (10000 minor units) for the same PSP reference and request ID. This is a field mismatch in the captured amount.",
+        "evidence" : [ "Report line shows amountMinor of 10200 GBP for pspReference psp_0b5b4249-76d4-4203-b192-557589cfb3d4", "Our operation bcd98a40-a655-4b03-8a2c-0684535d2340 shows amountMinor of 10000 GBP", "Field diff indicates amount_minor mismatch between external (10200) and internal (10000)" ],
+        "nextSteps" : [ "Investigate why the amount recorded in our books (10000 GBP) differs from the amount reported by the PSP (10200 GBP)", "Check with the billing or payment integration team if fees or adjustments were included by the PSP in the report line amount" ]
+      },
+      "error" : null,
+      "proposal" : null,
+      "toolCalls" : [ {
+        "tool" : "submit_analysis",
+        "args" : {
+          "nextSteps" : [ "Investigate why the amount recorded in our books (10000 GBP) differs from the amount reported by the PSP (10200 GBP)", "Check with the billing or payment integration team if fees or adjustments were included by the PSP in the report line amount" ],
+          "likelyCause" : "FIELD_MISMATCH",
+          "confidence" : "HIGH",
+          "evidence" : [ "Report line shows amountMinor of 10200 GBP for pspReference psp_0b5b4249-76d4-4203-b192-557589cfb3d4", "Our operation bcd98a40-a655-4b03-8a2c-0684535d2340 shows amountMinor of 10000 GBP", "Field diff indicates amount_minor mismatch between external (10200) and internal (10000)" ],
+          "explanation" : "The settlement report shows a higher amount (10200 minor units) than what was recorded in our books and operation (10000 minor units) for the same PSP reference and request ID. This is a field mismatch in the captured amount."
+        },
+        "ok" : true
+      } ],
+      "turns" : 1,
+      "tokens" : 2571
+    },
+    "analysisId" : "4a8a3494-f1d0-4e40-85d2-affc4887217a"
+  }, {
+    "scenario" : "UNKNOWN_TRANSACTION",
+    "expectedCause" : "UNKNOWN_TRANSACTION",
+    "expectedProposal" : false,
+    "runId" : "d9573e40-5506-4c90-b5f9-65c084e0f1f1",
+    "itemNo" : 2,
+    "facts" : {
+      "get_break" : {
+        "runId" : "d9573e40-5506-4c90-b5f9-65c084e0f1f1",
+        "itemNo" : 2,
+        "category" : "MISSING_INTERNAL",
+        "businessDate" : "2001-01-29",
+        "reportVersion" : 1,
+        "runSnapshotAt" : "2026-10-27T09:30:49.689553Z",
+        "pspReference" : "psp_1c985c8e-0715-4a21-912d-e0142bc9a496",
+        "reportLines" : [ {
+          "line" : 3,
+          "pspReference" : "psp_1c985c8e-0715-4a21-912d-e0142bc9a496",
+          "pspRequestId" : "req_eb907ee5-a345-497d-b31d-8ab57026dea5",
+          "txnType" : "CAPTURE",
+          "merchantId" : "m_eval_144a5f50-6c5e-4e1a-a68d-6b91c84af3a3",
+          "amountMinor" : 3000,
+          "currency" : "GBP",
+          "succeededAt" : "2001-01-29T10:00:00Z"
+        } ],
+        "ourOperationAtSnapshot" : null,
+        "diff" : { }
+      }
+    },
+    "elapsedMs" : 5477,
+    "result" : {
+      "status" : "COMPLETED",
+      "analysis" : {
+        "likelyCause" : "MISSING_FROM_REPORT",
+        "confidence" : "HIGH",
+        "explanation" : "The transaction appears in the PSP settlement report (line 3, capture of 3000 GBP on 2001-01-29) with reference psp_1c985c8e-0715-4a21-912d-e0142bc9a496 and request ID req_eb907ee5-a345-497d-b31d-8ab57026dea5, but there is no corresponding internal operation recorded in our books.",
+        "evidence" : [ "The break category is MISSING_INTERNAL, indicating a transaction exists in the PSP settlement report but not in our books.", "ourOperationAtSnapshot is null.", "find_operations returned no internal operation matching either the PSP reference (psp_1c985c8e-0715-4a21-912d-e0142bc9a496) or the PSP request ID (req_eb907ee5-a345-497d-b31d-8ab57026dea5)." ],
+        "nextSteps" : [ "Investigate why the payment capture was processed at the PSP without a corresponding internal record in our system.", "Check if the internal operation was dropped, failed to record, or if this represents an untracked external transaction." ]
+      },
+      "error" : null,
+      "proposal" : null,
+      "toolCalls" : [ {
+        "tool" : "find_operations",
+        "args" : {
+          "reference" : "psp_1c985c8e-0715-4a21-912d-e0142bc9a496"
+        },
+        "ok" : true
+      }, {
+        "tool" : "find_operations",
+        "args" : {
+          "reference" : "req_eb907ee5-a345-497d-b31d-8ab57026dea5"
+        },
+        "ok" : true
+      }, {
+        "tool" : "submit_analysis",
+        "args" : {
+          "likelyCause" : "MISSING_FROM_REPORT",
+          "confidence" : "HIGH",
+          "evidence" : [ "The break category is MISSING_INTERNAL, indicating a transaction exists in the PSP settlement report but not in our books.", "ourOperationAtSnapshot is null.", "find_operations returned no internal operation matching either the PSP reference (psp_1c985c8e-0715-4a21-912d-e0142bc9a496) or the PSP request ID (req_eb907ee5-a345-497d-b31d-8ab57026dea5)." ],
+          "explanation" : "The transaction appears in the PSP settlement report (line 3, capture of 3000 GBP on 2001-01-29) with reference psp_1c985c8e-0715-4a21-912d-e0142bc9a496 and request ID req_eb907ee5-a345-497d-b31d-8ab57026dea5, but there is no corresponding internal operation recorded in our books.",
+          "nextSteps" : [ "Investigate why the payment capture was processed at the PSP without a corresponding internal record in our system.", "Check if the internal operation was dropped, failed to record, or if this represents an untracked external transaction." ]
+        },
+        "ok" : true
+      } ],
+      "turns" : 3,
+      "tokens" : 4865
+    },
+    "error" : "\nexpected: UNKNOWN_TRANSACTION\n but was: MISSING_FROM_REPORT"
+  } ],
+  "evaluations" : [ ]
+}
