@@ -35,6 +35,7 @@ import org.openjdk.jmh.annotations.Warmup;
 import org.springframework.jdbc.core.simple.JdbcClient;
 import org.springframework.web.client.RestClient;
 import org.testcontainers.containers.PostgreSQLContainer;
+import org.testcontainers.utility.DockerImageName;
 
 /**
  * One {@link PspOperationWorker#runOnce()} per operation: claim a batch of pending operations, make
@@ -86,7 +87,11 @@ public class PspDispatchBenchmark {
     String user = System.getProperty("ledgerpay.bench.jdbc-user", "ledgerpay");
     String password = System.getProperty("ledgerpay.bench.jdbc-password", "ledgerpay");
     if (url == null) {
-      container = new PostgreSQLContainer<>("postgres:16-alpine");
+      container =
+          new PostgreSQLContainer<>(
+              // pgvector: payment-service's migrations create the extension (V13).
+              DockerImageName.parse("pgvector/pgvector:0.8.0-pg16")
+                  .asCompatibleSubstituteFor("postgres"));
       container.start();
       url = container.getJdbcUrl();
       user = container.getUsername();

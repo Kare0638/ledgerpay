@@ -7,6 +7,7 @@ import static org.awaitility.Awaitility.await;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.ledgerpay.common.money.Money;
+import com.ledgerpay.payment.PostgresTestcontainersConfiguration;
 import com.ledgerpay.payment.ledger.EntryType;
 import com.ledgerpay.payment.ledger.Ledger;
 import com.ledgerpay.payment.ledger.PostingRules;
@@ -63,7 +64,8 @@ import org.testcontainers.junit.jupiter.Testcontainers;
 class LedgerIntegrityIntegrationTest {
 
   @Container @ServiceConnection
-  static final PostgreSQLContainer<?> POSTGRES = new PostgreSQLContainer<>("postgres:16-alpine");
+  static final PostgreSQLContainer<?> POSTGRES =
+      new PostgreSQLContainer<>(PostgresTestcontainersConfiguration.IMAGE);
 
   static final String OPS_KEY = "ops_test_key";
   static final String OPS_KEY_HASH =

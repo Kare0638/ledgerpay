@@ -71,7 +71,8 @@ import org.testcontainers.containers.PostgreSQLContainer;
  */
 class PaymentHistoryPropertyTest {
 
-  static final PostgreSQLContainer<?> POSTGRES = new PostgreSQLContainer<>("postgres:16-alpine");
+  static final PostgreSQLContainer<?> POSTGRES =
+      new PostgreSQLContainer<>(PostgresTestcontainersConfiguration.IMAGE);
   static final StubPsp PSP = new StubPsp();
   static final int FEE_BPS = 100;
   static final Pattern REQUEST_ID = Pattern.compile("\"psp_request_id\"\\s*:\\s*\"([^\"]+)\"");

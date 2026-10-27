@@ -1,19 +1,25 @@
 package com.ledgerpay.payment.assistant;
 
+import com.fasterxml.jackson.databind.ObjectMapper;
 import com.sun.net.httpserver.HttpServer;
 import java.io.IOException;
 import java.io.UncheckedIOException;
 import java.net.InetSocketAddress;
 import java.nio.charset.StandardCharsets;
+import java.util.Arrays;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.concurrent.ConcurrentLinkedQueue;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.Executors;
+import java.util.stream.Collectors;
 
 /**
  * A scripted Gemini: answers each generateContent call with the next reply queued, and records the
- * calls, headers included, so tests can check where the key went. CI never talks to Google.
+ * calls, headers included, so tests can check where the key went. An embedContent call is answered
+ * apart, with a bag-of-words embedding of its text: texts with the same words get the same
+ * embedding, and the queue of replies is left alone. CI never talks to Google.
  */
 final class StubGemini {
 
@@ -30,8 +36,12 @@ final class StubGemini {
 
   record Reply(int status, String body) {}
 
+  private static final ObjectMapper MAPPER = new ObjectMapper();
+
   private final HttpServer server;
   private final List<Call> calls = new CopyOnWriteArrayList<>();
+  private final List<Call> embedCalls = new CopyOnWriteArrayList<>();
+  private volatile boolean embeddingsFail;
   private final ConcurrentLinkedQueue<Reply> replies = new ConcurrentLinkedQueue<>();
 
   StubGemini() {
@@ -44,12 +54,22 @@ final class StubGemini {
     server.createContext(
         "/",
         exchange -> {
-          calls.add(
+          Call call =
               new Call(
                   exchange.getRequestURI().toString(),
                   Map.copyOf(exchange.getRequestHeaders()),
-                  new String(exchange.getRequestBody().readAllBytes(), StandardCharsets.UTF_8)));
-          Reply reply = replies.poll();
+                  new String(exchange.getRequestBody().readAllBytes(), StandardCharsets.UTF_8));
+          Reply reply;
+          if (call.uri().endsWith(":embedContent")) {
+            embedCalls.add(call);
+            reply =
+                embeddingsFail
+                    ? new Reply(400, "{\"error\": {\"status\": \"INVALID_ARGUMENT\"}}")
+                    : new Reply(200, embedding(call.body()));
+          } else {
+            calls.add(call);
+            reply = replies.poll();
+          }
           if (reply == null) {
             reply =
                 new Reply(
@@ -71,11 +91,44 @@ final class StubGemini {
 
   void reset() {
     calls.clear();
+    embedCalls.clear();
     replies.clear();
+    embeddingsFail = false;
   }
 
+  /** The generateContent calls. */
   List<Call> calls() {
     return List.copyOf(calls);
+  }
+
+  List<Call> embedCalls() {
+    return List.copyOf(embedCalls);
+  }
+
+  /** From now on every embedContent call is refused. */
+  void failEmbeddings() {
+    embeddingsFail = true;
+  }
+
+  /** Each word of the text counted in one of the 768 dimensions. */
+  private static String embedding(String body) {
+    String text;
+    try {
+      text = MAPPER.readTree(body).path("content").path("parts").path(0).path("text").asText();
+    } catch (IOException e) {
+      throw new UncheckedIOException(e);
+    }
+    int[] counts = new int[768];
+    for (String word : text.toLowerCase(Locale.ROOT).split("[^a-z0-9_]+")) {
+      if (!word.isEmpty()) {
+        counts[Math.floorMod(word.hashCode(), counts.length)]++;
+      }
+    }
+    return "{\"embedding\": {\"values\": "
+        + Arrays.stream(counts)
+            .mapToObj(Integer::toString)
+            .collect(Collectors.joining(",", "[", "]"))
+        + "}}";
   }
 
   /** The model calls one tool, with a thought signature as Gemini's thinking models send. */

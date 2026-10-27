@@ -35,7 +35,9 @@ class SecretsTest {
         Duration.ofSeconds(5),
         8,
         0,
-        Duration.ZERO);
+        Duration.ZERO,
+        "gemini-embedding-001",
+        3);
   }
 
   @Test

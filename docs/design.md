@@ -435,6 +435,10 @@ CREATE TABLE assistant_analyses (
     tokens      INT,
     created_at  TIMESTAMPTZ NOT NULL DEFAULT now()
 );
+-- V13__assistant_precedents.sql (#64), set on insert like every other column:
+--   break_signature  TEXT          what kind of break, without IDs, times or amounts
+--   break_embedding  vector(768)   its embedding (pgvector); null if the call failed
+--   precedent_ids    UUID[]        the earlier analyses it was given, in order
 
 CREATE TABLE inquiry_proposals (
     id                UUID PRIMARY KEY,
@@ -957,6 +961,8 @@ An operator asks for an analysis of one break (`POST /ops/recon-runs/{id}/items/
 **A fixed output, validated.** The model finishes by calling `submit_analysis`, whose parameters are the schema: `likelyCause` (one of `OUTCOME_NOT_RECEIVED`, `CONFLICTING_OUTCOME`, `DUPLICATE_IN_REPORT`, `MISSING_FROM_REPORT`, `FIELD_MISMATCH`, `UNKNOWN_TRANSACTION`, `INSUFFICIENT_EVIDENCE`), `confidence`, `explanation`, 1–8 `evidence` lines, up to 5 `nextSteps`. It is checked before it is stored: the enums, the lengths, and every UUID or PSP reference cited must be one the tools returned. A refused submission goes back once with the reason; a second is stored as `INVALID_OUTPUT`, with nothing to show. Eight model calls without a valid analysis is `FAILED`.
 
 **Kept.** Every analysis is stored, append-only, with the model, its tool calls in order, turns and tokens (`assistant_analyses`, section 6); a proposal is decided once (`inquiry_proposals`).
+
+**Precedents** (#64). An analysis also gets up to three earlier ones as hints: for each other break its latest COMPLETED analysis, unless the inquiry it proposed is still open or was rejected. A break is its operation, else its PSP reference, else its item: a break that stays open is an item of every run until it closes, and a report run again repeats them all, so its analyses in other runs are its own, never precedents of it. The break is described without IDs, times, amounts or free text (category, the fields that differ, how our operation, its payment, journals and webhooks stand; whether there was a last error, not its text; a status that is not a plain enum word reads `other`), that text is embedded with Gemini's embedding model, and the closest are found by cosine distance in Postgres (pgvector; same category first, then distance, then the newest). An exact scan is enough at this size, so there is no vector index. A precedent is shown as that description, its `likelyCause` and `confidence`, and whether a person confirmed its inquiry: not its explanation, evidence or next steps, which are the model's free text about another break, with amounts and dates the validator would not stop being repeated as facts. Precedents are not facts: an ID only they hold is refused like an invented one. Without an embedding the analysis goes ahead with none; each analysis records the precedents it was given. `ledgerpay.assistant.max-precedents=0` turns them off, for comparing the evaluation with and without; breaks are still embedded, so analyses made meanwhile are precedents once they are on again. V13 creates the `vector` extension, which needs a superuser: where Flyway's role is not one, an administrator creates it first.
 
 **Calls to Gemini.** The key goes in the `x-goog-api-key` header only, and is redacted from every error (SECURITY.md). 429, 500 and 503 are retried with backoff, but a 429 for a daily quota fails at once, and a wait Google asks for is honoured only up to 60 seconds. A model that cannot be reached is 503 `ASSISTANT_UNAVAILABLE`. Tests run against a stub; only synthetic demo data goes to the free tier, which Google may use to improve its products.
 
