@@ -326,8 +326,8 @@ class MetricsIntegrationTest {
             """
             INSERT INTO settlement_reports (id, psp, business_date, file_sha256, version, status,
                                             row_count)
-            VALUES (?, ?, DATE '2001-01-01', 'sha', 1, 'VALID', 0)""")
-        .params(report, psp)
+            VALUES (?, ?, ?, 'sha', 1, 'VALID', 0)""")
+        .params(report, psp, TestDays.next())
         .update();
     ExecutorService closed = Executors.newVirtualThreadPerTaskExecutor();
     closed.close();
